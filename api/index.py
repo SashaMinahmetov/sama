@@ -117,6 +117,42 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
+
+# НОВАЯ ФУНКЦИЯ: МАССОВАЯ РАССЫЛКА
+@dp.message(Command("sendall"))
+async def cmd_sendall(message: types.Message):
+    # Проверяем, что команду написали именно в админской группе
+    if str(message.chat.id) != ADMIN_ID:
+        return 
+        
+    # Отрезаем само слово /sendall, чтобы получить только текст рассылки
+    text_to_send = message.text.replace("/sendall", "").strip()
+    
+    if not text_to_send:
+        await message.answer("⚠️ Ви не ввели текст. Використання: `/sendall Ваш текст`", parse_mode="Markdown")
+        return
+        
+    await message.answer("⏳ Розпочинаю розсилку...")
+    
+    # Достаем все ключи пользователей из базы Redis
+    keys = await redis.keys("user:*")
+    success_count = 0
+    error_count = 0
+    
+    for key in keys:
+        # Извлекаем ID пользователя из ключа (формат ключа 'user:123456')
+        user_id_str = key.decode('utf-8').split(":")[1]
+        try:
+            # Отправляем сообщение
+            await bot.send_message(chat_id=int(user_id_str), text=text_to_send, parse_mode="HTML")
+            success_count += 1
+        except Exception as e:
+            # Если пользователь удалил чат с ботом или заблокировал его
+            error_count += 1
+            
+    await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Успішно доставлено: {success_count}\n🔴 Помилок (заблокували бота): {error_count}", parse_mode="HTML")
+
+
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules(message: types.Message):
     rules = (
