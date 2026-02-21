@@ -10,6 +10,10 @@ from redis.asyncio import Redis
 
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
+
+# Вставляем ID группы ОБЯЗАТЕЛЬНО С МИНУСОМ (и в кавычках)
+ADMIN_ID = "-1003731208847"
 
 # Пытаемся найти адрес базы данных (Vercel создает KV_URL или KV_REST_API_URL)
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
