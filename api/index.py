@@ -2,11 +2,14 @@ import os
 import logging
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
-from aiogram.filters import Command  # <--- ВОТ ЭТА СТРОКА ВСЁ ЧИНИТ
+from aiogram.filters import Command
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+)
 from redis.asyncio import Redis
 
 # --- НАСТРОЙКИ ---
@@ -28,14 +31,26 @@ class Registration(StatesGroup):
     waiting_for_phone = State()
     waiting_for_receipt = State()
 
-# --- КЛАВИАТУРЫ ---
-def get_main_kb():
+# --- КЛАВІАТУРИ ---
+
+# 1. Нижня панель (завжди на екрані)
+def get_main_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🧾 Завантажити чек"), KeyboardButton(text="👤 Мій кабінет")],
-            [KeyboardButton(text="📸 Наш Instagram"), KeyboardButton(text="🎁 Умови розіграшу")]
+            [KeyboardButton(text="🎁 Умови розіграшу")]
         ],
         resize_keyboard=True
+    )
+
+# 2. Екранні кнопки (під повідомленням)
+def get_inline_start_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt")],
+            [InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")],
+            [InlineKeyboardButton(text="📸 Наш Instagram", url=INSTAGRAM_LINK)]
+        ]
     )
 
 def get_cancel_kb():
@@ -44,46 +59,15 @@ def get_cancel_kb():
         resize_keyboard=True
     )
 
-# --- ЛОГИКА БОТА ---
+# --- СПІЛЬНА ЛОГІКА ДЛЯ КНОПОК ---
 
-# 1. Главное меню и приветствие
-@dp.message(Command("start"))
-@dp.message(F.text == "❌ Скасувати")
-async def cmd_start(message: types.Message, state: FSMContext):
-    await state.set_state(None) # Сбрасываем любые начатые действия
-    welcome_text = (
-        "👋 <b>Вітаємо у нашому святковому розіграші!</b> 🎉\n\n"
-        "Тут ви можете реєструвати чеки за покупку нашої продукції та вигравати неймовірні призи! 🎁\n\n"
-        "Оберіть потрібний розділ меню нижче 👇"
-    )
-    await message.answer(welcome_text, reply_markup=get_main_kb(), parse_mode="HTML")
-
-# 2. Инстаграм и Условия
-@dp.message(F.text == "📸 Наш Instagram")
-async def show_instagram(message: types.Message):
-    await message.answer(f"Слідкуйте за нами та результатами розіграшу в Instagram!\n👉 {INSTAGRAM_LINK}")
-
-@dp.message(F.text == "🎁 Умови розіграшу")
-async def show_rules(message: types.Message):
-    rules = (
-        "📜 <b>Умови дуже прості:</b>\n\n"
-        "1️⃣ Купуйте нашу продукцію у мережі магазинів.\n"
-        "2️⃣ Натискайте «Завантажити чек» у цьому боті.\n"
-        "3️⃣ Надсилайте фото чека та беріть участь у розіграші!\n\n"
-        "Більше чеків — більше шансів на перемогу! 🍀"
-    )
-    await message.answer(rules, parse_mode="HTML")
-
-# 3. Личный кабинет (Чтение из Redis)
-@dp.message(F.text == "👤 Мій кабінет")
-async def show_cabinet(message: types.Message):
-    user_id = message.from_user.id
+async def process_show_cabinet(target_message, user_id: int):
     user_data = await redis.hgetall(f"user:{user_id}")
     
     if not user_data:
-        await message.answer(
+        await target_message.answer(
             "🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Завантажити чек», щоб створити профіль та додати перший чек!", 
-            reply_markup=get_main_kb()
+            reply_markup=get_main_reply_kb()
         )
         return
 
@@ -98,28 +82,80 @@ async def show_cabinet(message: types.Message):
         f"🎫 <b>Зареєстровано чеків:</b> {receipts_count}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
-    await message.answer(cabinet_text, parse_mode="HTML")
+    await target_message.answer(cabinet_text, parse_mode="HTML")
 
-# 4. Процесс загрузки чека
-@dp.message(F.text == "🧾 Завантажити чек")
-async def start_receipt_upload(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
+async def process_start_upload(target_message, user_id: int, state: FSMContext):
     user_data = await redis.hgetall(f"user:{user_id}")
     
     if not user_data or b'phone' not in user_data:
-        await message.answer(
+        await target_message.answer(
             "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
             reply_markup=get_cancel_kb(),
             parse_mode="HTML"
         )
         await state.set_state(Registration.waiting_for_fio)
     else:
-        await message.answer(
+        await target_message.answer(
             "📸 Будь ласка, відправте чітке фото вашого чека.", 
             reply_markup=get_cancel_kb()
         )
         await state.set_state(Registration.waiting_for_receipt)
 
+
+# --- ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ---
+
+# 1. Головне меню та старт
+@dp.message(Command("start"))
+@dp.message(F.text == "❌ Скасувати")
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.set_state(None) 
+    
+    # Відправляємо приховане повідомлення для виклику нижньої клавіатури
+    await message.answer("Головне меню відкрито 👇", reply_markup=get_main_reply_kb())
+    
+    welcome_text = (
+        "👋 <b>Вітаємо у нашому святковому розіграші!</b> 🎉\n\n"
+        "Тут ви можете реєструвати чеки за покупку нашої продукції та вигравати неймовірні призи! 🎁\n\n"
+        "Оберіть потрібний розділ нижче 👇"
+    )
+    # Відправляємо гарний текст з екранними кнопками
+    await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
+
+@dp.message(F.text == "🎁 Умови розіграшу")
+async def show_rules(message: types.Message):
+    rules = (
+        "📜 <b>Умови дуже прості:</b>\n\n"
+        "1️⃣ Купуйте нашу продукцію у мережі магазинів.\n"
+        "2️⃣ Натискайте «Завантажити чек» у цьому боті.\n"
+        "3️⃣ Надсилайте фото чека та беріть участь у розіграші!\n\n"
+        "Більше чеків — більше шансів на перемогу! 🍀"
+    )
+    await message.answer(rules, parse_mode="HTML")
+
+
+# 2. Обробка кнопок "Мій кабінет" (Нижня + Екранна)
+@dp.message(F.text == "👤 Мій кабінет")
+async def show_cabinet_msg(message: types.Message):
+    await process_show_cabinet(message, message.from_user.id)
+
+@dp.callback_query(F.data == "my_cabinet")
+async def show_cabinet_call(call: CallbackQuery):
+    await call.answer() # Прибирає годинник завантаження на кнопці
+    await process_show_cabinet(call.message, call.from_user.id)
+
+
+# 3. Обробка кнопок "Завантажити чек" (Нижня + Екранна)
+@dp.message(F.text == "🧾 Завантажити чек")
+async def start_upload_msg(message: types.Message, state: FSMContext):
+    await process_start_upload(message, message.from_user.id, state)
+
+@dp.callback_query(F.data == "upload_receipt")
+async def start_upload_call(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await process_start_upload(call.message, call.from_user.id, state)
+
+
+# 4. Процес реєстрації (ФІО -> Телефон -> Чек)
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     await state.update_data(fio=message.text)
@@ -141,11 +177,7 @@ async def process_phone(message: types.Message, state: FSMContext):
     fio = fsm_data.get("fio", "Не вказано")
     
     user_id = message.from_user.id
-    await redis.hset(f"user:{user_id}", mapping={
-        "fio": fio, 
-        "phone": phone, 
-        "receipts": 0 
-    })
+    await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "receipts": 0})
     
     await message.answer(
         "✅ <b>Реєстрація успішна!</b>\n\nТепер відправте фото вашого чека 📸", 
@@ -182,7 +214,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
 
     await message.answer(
         f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь!", 
-        reply_markup=get_main_kb(),
+        reply_markup=get_main_reply_kb(),
         parse_mode="HTML"
     )
     await state.set_state(None)
@@ -191,10 +223,11 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
 async def error_receipt_format(message: types.Message):
     await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸", parse_mode="HTML")
 
+
 # --- WEBHOOK ---
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "message": "Бот з особистим кабінетом працює!"}
+    return {"status": "ok", "message": "Бот з двома клавіатурами працює!"}
 
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
