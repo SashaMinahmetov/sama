@@ -1,5 +1,6 @@
 import os
 import logging
+import aiohttp
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -15,11 +16,16 @@ from redis.asyncio import Redis
 # --- НАСТРОЙКИ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
+GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
 INSTAGRAM_LINK = "https://instagram.com/твой_аккаунт" # Замени на свою ссылку
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
+
+if not REDIS_URL:
+    raise ValueError("Не найдена переменная окружения KV_URL для Redis.")
+
 redis = Redis.from_url(REDIS_URL)
 storage = RedisStorage(redis=redis)
 dp = Dispatcher(storage=storage)
@@ -32,8 +38,6 @@ class Registration(StatesGroup):
     waiting_for_receipt = State()
 
 # --- КЛАВІАТУРИ ---
-
-# 1. Нижня панель (завжди на екрані)
 def get_main_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -43,7 +47,6 @@ def get_main_reply_kb():
         resize_keyboard=True
     )
 
-# 2. Екранні кнопки (під повідомленням)
 def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -60,7 +63,6 @@ def get_cancel_kb():
     )
 
 # --- СПІЛЬНА ЛОГІКА ДЛЯ КНОПОК ---
-
 async def process_show_cabinet(target_message, user_id: int):
     user_data = await redis.hgetall(f"user:{user_id}")
     
@@ -103,22 +105,16 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
 
 
 # --- ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ---
-
-# 1. Головне меню та старт
 @dp.message(Command("start"))
 @dp.message(F.text == "❌ Скасувати")
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.set_state(None) 
-    
-    # Відправляємо приховане повідомлення для виклику нижньої клавіатури
     await message.answer("Головне меню відкрито 👇", reply_markup=get_main_reply_kb())
-    
     welcome_text = (
         "👋 <b>Вітаємо у нашому святковому розіграші!</b> 🎉\n\n"
         "Тут ви можете реєструвати чеки за покупку нашої продукції та вигравати неймовірні призи! 🎁\n\n"
         "Оберіть потрібний розділ нижче 👇"
     )
-    # Відправляємо гарний текст з екранними кнопками
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
 @dp.message(F.text == "🎁 Умови розіграшу")
@@ -132,19 +128,15 @@ async def show_rules(message: types.Message):
     )
     await message.answer(rules, parse_mode="HTML")
 
-
-# 2. Обробка кнопок "Мій кабінет" (Нижня + Екранна)
 @dp.message(F.text == "👤 Мій кабінет")
 async def show_cabinet_msg(message: types.Message):
     await process_show_cabinet(message, message.from_user.id)
 
 @dp.callback_query(F.data == "my_cabinet")
 async def show_cabinet_call(call: CallbackQuery):
-    await call.answer() # Прибирає годинник завантаження на кнопці
+    await call.answer() 
     await process_show_cabinet(call.message, call.from_user.id)
 
-
-# 3. Обробка кнопок "Завантажити чек" (Нижня + Екранна)
 @dp.message(F.text == "🧾 Завантажити чек")
 async def start_upload_msg(message: types.Message, state: FSMContext):
     await process_start_upload(message, message.from_user.id, state)
@@ -154,8 +146,6 @@ async def start_upload_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await process_start_upload(call.message, call.from_user.id, state)
 
-
-# 4. Процес реєстрації (ФІО -> Телефон -> Чек)
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     await state.update_data(fio=message.text)
@@ -199,18 +189,37 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     new_count = new_count.decode('utf-8')
 
     photo_id = message.photo[-1].file_id
+    username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
 
+    # 1. Відправка адмінам в Telegram
     admin_caption = (
         f"🆕 <b>Новий чек! (Всього у клієнта: {new_count})</b>\n\n"
         f"👤 <b>ПІБ:</b> {fio}\n"
         f"📱 <b>Телефон:</b> {phone}\n"
-        f"💬 <b>Юзернейм:</b> @{message.from_user.username if message.from_user.username else 'Немає'}"
+        f"💬 <b>Юзернейм:</b> {username}"
     )
     
     try:
         await bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=admin_caption, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Помилка відправки в групу: {e}")
+
+    # 2. Відправка в Google Таблицю з перевіркою помилок
+    if GOOGLE_WEBHOOK_URL:
+        google_data = {
+            "fio": fio,
+            "phone": phone,
+            "username": username,
+            "receipt_number": new_count
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(GOOGLE_WEBHOOK_URL, json=google_data) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Помилка Google Таблиці! Статус: {response.status}\nТекст: {error_text}")
+        except Exception as e:
+            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Технічна помилка підключення до Google: {e}")
 
     await message.answer(
         f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь!", 
@@ -223,11 +232,10 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
 async def error_receipt_format(message: types.Message):
     await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸", parse_mode="HTML")
 
-
 # --- WEBHOOK ---
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "message": "Бот з двома клавіатурами працює!"}
+    return {"status": "ok", "message": "Бот працює!"}
 
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
