@@ -7,66 +7,57 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 
-# Токен будем брать из переменных окружения Vercel
+# Инициализация
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
 bot = Bot(token=BOT_TOKEN)
-# ВНИМАНИЕ: MemoryStorage сбрасывается на Vercel между запросами. 
-# Для продакшена мы заменим это на Redis.
 dp = Dispatcher(storage=MemoryStorage())
 app = FastAPI()
 
+# Состояния
 class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
     waiting_for_receipt = State()
 
+# --- Логика бота ---
 @dp.message(F.text == "/start")
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
-    await message.answer(
-        "Добро пожаловать в розыгрыш! 🎉\n\nДля участия напишите ваше ФИО:",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await message.answer("Добро пожаловать! Напишите ваше ФИО:", reply_markup=ReplyKeyboardRemove())
     await state.set_state(Registration.waiting_for_fio)
 
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     await state.update_data(fio=message.text)
-    kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📱 Отправить номер телефона", request_contact=True)]],
-        resize_keyboard=True,
-        one_time_keyboard=True
-    )
-    await message.answer("Отлично! Теперь введите ваш номер или нажмите кнопку:", reply_markup=kb)
+    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Отправить номер", request_contact=True)]], resize_keyboard=True)
+    await message.answer("ФИО принято! Теперь телефон:", reply_markup=kb)
     await state.set_state(Registration.waiting_for_phone)
 
 @dp.message(Registration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    phone = message.contact.phone_number if message.contact else message.text
-    await state.update_data(phone=phone)
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🧾 Загрузить чек")]], resize_keyboard=True)
-    await message.answer("Успешно!\nТеперь нажмите «Загрузить чек» внизу.", reply_markup=kb)
+    await message.answer("Спасибо! Загрузите чек.")
     await state.set_state(Registration.waiting_for_receipt)
 
-@dp.message(Registration.waiting_for_receipt, F.text == "🧾 Загрузить чек")
-async def ask_for_photo(message: types.Message):
-    await message.answer("Прикрепите фото чека.", reply_markup=ReplyKeyboardRemove())
-
 @dp.message(Registration.waiting_for_receipt, F.photo)
-async def process_receipt_photo(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    photo_file_id = message.photo[-1].file_id
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="🧾 Загрузить чек")]], resize_keyboard=True)
-    await message.answer("✅ Чек загружен!\nМожете загрузить еще.", reply_markup=kb)
+async def process_receipt(message: types.Message):
+    await message.answer("Чек принят! ✅")
 
-# Эндпоинт, на который Telegram будет присылать сообщения пользователей
+# --- СИСТЕМНЫЕ ФУНКЦИИ (WEBHOOK) ---
+
+# 1. Проверка работоспособности (чтобы не было 404 в браузере)
+@app.get("/")
+@app.get("/api/webhook")
+async def health_check():
+    return {"status": "ok", "message": "Бот работает! Vercel видит этот файл."}
+
+# 2. Прием сообщений от Telegram (POST)
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
     try:
         data = await request.json()
         update = types.Update(**data)
         await dp.feed_update(bot, update)
+        return {"status": "ok"}
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-    return {"status": "ok"}
+        logging.error(f"Error: {e}")
+        return {"status": "error", "message": str(e)}
