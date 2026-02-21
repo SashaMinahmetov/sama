@@ -12,20 +12,15 @@ from redis.asyncio import Redis
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 
-# Вставляем ID группы ОБЯЗАТЕЛЬНО С МИНУСОМ (и в кавычках)
-ADMIN_ID = "-1003731208847"
-
-# Пытаемся найти адрес базы данных (Vercel создает KV_URL или KV_REST_API_URL)
-REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
+# ID группы, куда будут прилетать чеки
+ADMIN_ID = "-1003731208847" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
 
-# Если Redis подключен — используем его. Если нет — упадем с ошибкой (чтобы сразу понять).
 if not REDIS_URL:
-    raise ValueError("Не найдена переменная окружения KV_URL. Проверьте подключение базы в Vercel Storage.")
+    raise ValueError("Не найдена переменная окружения KV_URL для Redis.")
 
-# Создаем подключение к Redis и передаем его в диспетчер
 redis = Redis.from_url(REDIS_URL)
 storage = RedisStorage(redis=redis)
 dp = Dispatcher(storage=storage)
@@ -67,7 +62,6 @@ async def process_fio(message: types.Message, state: FSMContext):
 
 @dp.message(Registration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    # Получаем телефон (или текстом, или контактом)
     phone = message.contact.phone_number if message.contact else message.text
     await state.update_data(phone=phone)
     
@@ -91,21 +85,42 @@ async def ask_for_photo(message: types.Message):
 
 @dp.message(Registration.waiting_for_receipt, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
-    # Получаем все данные пользователя из Redis
+    # Получаем данные пользователя
     user_data = await state.get_data()
-    fio = user_data.get("fio")
-    phone = user_data.get("phone")
+    fio = user_data.get("fio", "Не указано")
+    phone = user_data.get("phone", "Не указан")
+    
+    # Берем самое качественное фото
     photo_id = message.photo[-1].file_id
 
-    # Тут потом добавим отправку в Гугл Таблицы
-    logging.info(f"ЗАЯВКА: {fio} | {phone} | ФОТО: {photo_id}")
+    # Формируем красивое сообщение для группы
+    admin_caption = (
+        f"🆕 <b>Новая заявка на розыгрыш!</b>\n\n"
+        f"👤 <b>ФИО:</b> {fio}\n"
+        f"📱 <b>Телефон:</b> {phone}\n"
+        f"💬 <b>Отправитель:</b> @{message.from_user.username if message.from_user.username else 'Нет юзернейма'}"
+    )
+    
+    try:
+        # Отправляем фото и данные в рабочую группу
+        await bot.send_photo(
+            chat_id=ADMIN_ID, 
+            photo=photo_id, 
+            caption=admin_caption, 
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        logging.error(f"Не удалось отправить чек в группу: {e}")
+        # Если бот не в группе или нет прав — он скажет об этом прямо в чате!
+        await message.answer(f"⚠️ Техническая ошибка при отправке в группу. Текст ошибки: {e}")
 
+    # Отвечаем пользователю
     kb = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="🧾 Загрузить чек")]],
         resize_keyboard=True
     )
     await message.answer(
-        "✅ Чек принят! Вы участвуете в розыгрыше.\nЕсли есть еще чеки — загружайте.",
+        "✅ Чек успешно загружен и принят к участию!\n\nЕсли у вас есть еще чеки для регистрации, вы можете загрузить их прямо сейчас.",
         reply_markup=kb
     )
 
@@ -113,7 +128,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "message": "Бот работает на Redis!"}
+    return {"status": "ok", "message": "Бот работает, чеки летят в группу!"}
 
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
