@@ -2,6 +2,7 @@ import os
 import logging
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command  # <--- ВОТ ЭТА СТРОКА ВСЁ ЧИНИТ
 from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
@@ -77,7 +78,6 @@ async def show_rules(message: types.Message):
 @dp.message(F.text == "👤 Мій кабінет")
 async def show_cabinet(message: types.Message):
     user_id = message.from_user.id
-    # Получаем профиль из базы
     user_data = await redis.hgetall(f"user:{user_id}")
     
     if not user_data:
@@ -87,7 +87,6 @@ async def show_cabinet(message: types.Message):
         )
         return
 
-    # Декодируем данные из Redis
     fio = user_data.get(b'fio', b'').decode('utf-8')
     phone = user_data.get(b'phone', b'').decode('utf-8')
     receipts_count = user_data.get(b'receipts', b'0').decode('utf-8')
@@ -101,13 +100,12 @@ async def show_cabinet(message: types.Message):
     )
     await message.answer(cabinet_text, parse_mode="HTML")
 
-# 4. Процесс загрузки чека (с проверкой регистрации)
+# 4. Процесс загрузки чека
 @dp.message(F.text == "🧾 Завантажити чек")
 async def start_receipt_upload(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # Если пользователь еще не вводил данные
     if not user_data or b'phone' not in user_data:
         await message.answer(
             "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
@@ -116,7 +114,6 @@ async def start_receipt_upload(message: types.Message, state: FSMContext):
         )
         await state.set_state(Registration.waiting_for_fio)
     else:
-        # Если уже зарегистрирован — сразу просим чек
         await message.answer(
             "📸 Будь ласка, відправте чітке фото вашого чека.", 
             reply_markup=get_cancel_kb()
@@ -140,17 +137,14 @@ async def process_fio(message: types.Message, state: FSMContext):
 @dp.message(Registration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
-    
-    # Получаем ФИО из временного состояния FSM
     fsm_data = await state.get_data()
     fio = fsm_data.get("fio", "Не вказано")
     
-    # СОХРАНЯЕМ ПРОФИЛЬ В REDIS НАВСЕГДА
     user_id = message.from_user.id
     await redis.hset(f"user:{user_id}", mapping={
         "fio": fio, 
         "phone": phone, 
-        "receipts": 0 # Стартовое количество чеков
+        "receipts": 0 
     })
     
     await message.answer(
@@ -164,19 +158,16 @@ async def process_phone(message: types.Message, state: FSMContext):
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
-    # Берем данные прямо из профиля Redis
     user_data = await redis.hgetall(f"user:{user_id}")
     fio = user_data.get(b'fio', b'').decode('utf-8')
     phone = user_data.get(b'phone', b'').decode('utf-8')
     
-    # УВЕЛИЧИВАЕМ СЧЕТЧИК ЧЕКОВ НА +1
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
 
     photo_id = message.photo[-1].file_id
 
-    # Отправляем в группу админам
     admin_caption = (
         f"🆕 <b>Новий чек! (Всього у клієнта: {new_count})</b>\n\n"
         f"👤 <b>ПІБ:</b> {fio}\n"
@@ -194,9 +185,8 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         reply_markup=get_main_kb(),
         parse_mode="HTML"
     )
-    await state.set_state(None) # Возвращаем в главное меню
+    await state.set_state(None)
 
-# На случай, если на шаге чека прислали текст, а не фото
 @dp.message(Registration.waiting_for_receipt, F.text)
 async def error_receipt_format(message: types.Message):
     await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸", parse_mode="HTML")
