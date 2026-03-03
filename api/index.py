@@ -24,19 +24,13 @@ GOOGLE_AI_KEY = os.environ.get("GOOGLE_AI_KEY")
 ADMIN_ID = "-1003731208847" 
 INSTAGRAM_LINK = "https://instagram.com/твой_аккаунт"
 
-# --- СПИСОК АКЦІЙНИХ ТОВАРІВ (КЛЮЧОВІ СЛОВА) ---
-# Я виписав бренди з твого фото чека. Бот шукатиме хоча б одне з цих слів.
-PROMO_PRODUCTS = """
-ЛЮБИСТОК
-ТОРЧИН
-RIO
-MOLENDAM
-МОЛЕНДАМ
-КЕТЧУП
-АНАНАСИ
-ШАМПІНЬЙОНИ
-ПРИПРАВА
-"""
+# --- СПИСОК АКЦІЙНИХ ТОВАРІВ ---
+# Форматуємо в один рядок для кращого розуміння AI
+PROMO_PRODUCTS_LIST = [
+    "ЛЮБИСТОК", "ТОРЧИН", "RIO", "MOLENDAM", "МОЛЕНДАМ", 
+    "КЕТЧУП", "АНАНАСИ", "ШАМПІНЬЙОНИ", "ПРИПРАВА"
+]
+PROMO_PRODUCTS_STR = ", ".join(PROMO_PRODUCTS_LIST)
 
 # --- ІНІЦІАЛІЗАЦІЯ ---
 bot = Bot(token=BOT_TOKEN)
@@ -52,7 +46,9 @@ app = FastAPI()
 # Налаштування AI Gemini
 if GOOGLE_AI_KEY:
     genai.configure(api_key=GOOGLE_AI_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # ВАЖЛИВО: Змінюємо 'flash' на 'pro' для кращого зору
+    # Якщо pro буде падати з помилкою квоти, зміни назад на 'gemini-1.5-flash'
+    model = genai.GenerativeModel('gemini-1.5-pro')
 
 # --- СТАНИ FSM ---
 class Registration(StatesGroup):
@@ -93,38 +89,38 @@ def get_manual_review_kb():
         ]
     )
 
-# --- ФУНКЦІЯ ПЕРЕВІРКИ ЧЕКА (AI GEMINI) ---
+# --- ФУНКЦІЯ ПЕРЕВІРКИ ЧЕКА (AI GEMINI PRO) ---
 async def check_receipt_with_ai(photo_bytes):
     if not GOOGLE_AI_KEY:
-        return False, "❌ Помилка: Немає API ключа (GOOGLE_AI_KEY)"
+        return False, "❌ Помилка: Немає API ключа"
     
     try:
         image_part = {"mime_type": "image/jpeg", "data": photo_bytes}
         
-        # Промпт для нейромережі: шукати не точний текст, а ключові слова
+        # Більш детальний промпт
         prompt = f"""
-        Analyze this image. It is a store receipt.
+        Analyze this image carefully. It is a store receipt.
         
-        Task: Look for ANY of these KEYWORDS in the receipt text:
-        {PROMO_PRODUCTS}
+        Target Keywords: {PROMO_PRODUCTS_STR}
         
-        INSTRUCTIONS:
-        1. Scan the text for these brand names or product types.
-        2. Ignore numbers (like 30g, 50g) and small typos (e.g. "30Г" vs "З0Г").
-        3. IF you see at least ONE target keyword -> Answer "YES".
-        4. IF the image is NOT a receipt or NO keywords found -> Answer "NO".
+        Step 1: Read ALL text from the receipt.
+        Step 2: Check if ANY of the Target Keywords appear in the text.
+        Step 3: Ignore case and small typos (e.g. "30Г" vs "З0Г").
         
-        Answer strictly: "YES" or "NO".
+        OUTPUT FORMAT:
+        If FOUND: Start response with "YES". Then list what you found.
+        If NOT FOUND: Start response with "NO". Then list 5-10 main products you actually saw on the receipt (for debugging).
         """
         
-        # Виконуємо запит
+        # Виконуємо запит (це може зайняти 3-5 секунд)
         response = await asyncio.to_thread(model.generate_content, [prompt, image_part])
-        answer = response.text.strip().upper()
+        answer = response.text.strip()
         
-        if "YES" in answer:
-            return True, "OK"
+        # Логіка визначення
+        if answer.upper().startswith("YES"):
+            return True, answer # Повертаємо повну відповідь для логів
         else:
-            return False, f"AI відповідь: {answer}"
+            return False, answer # Повертаємо пояснення, що він там побачив
             
     except Exception as e:
         logging.error(f"AI Check Error: {e}")
@@ -144,7 +140,6 @@ async def callback_cancel(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await cmd_start(call.message, state)
 
-# Розсилка повідомлень всім (Тільки для адміна)
 @dp.message(Command("sendall"))
 async def cmd_sendall(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
@@ -165,7 +160,8 @@ async def cmd_sendall(message: types.Message):
 
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules(message: types.Message):
-    await message.answer(f"Купуйте товари брендів:\n{PROMO_PRODUCTS}\nЗавантажуйте чек та вигравайте!", parse_mode="HTML")
+    products_list = "\n".join([f"• {p}" for p in PROMO_PRODUCTS_LIST])
+    await message.answer(f"Купуйте товари брендів:\n{products_list}\n\nЗавантажуйте чек та вигравайте!", parse_mode="HTML")
 
 @dp.message(F.text == "👤 Мій кабінет")
 async def show_cabinet_msg(message: types.Message):
@@ -222,7 +218,7 @@ async def process_phone(message: types.Message, state: FSMContext):
 # --- ГОЛОВНА ЛОГІКА ОБРОБКИ ФОТО ---
 @dp.message(Registration.waiting_for_receipt, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
-    waiting_msg = await message.answer("⏳ <b>Штучний інтелект перевіряє ваш чек...</b>", parse_mode="HTML")
+    waiting_msg = await message.answer("⏳ <b>AI сканує чек... (це може зайняти до 5 сек)</b>", parse_mode="HTML")
     
     # 1. Завантажуємо фото
     photo = message.photo[-1]
@@ -232,28 +228,33 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     photo_data = photo_bytes.getvalue()
 
     # 2. Перевіряємо через Gemini AI
-    is_valid, reason = await check_receipt_with_ai(photo_data)
+    is_valid, ai_response = await check_receipt_with_ai(photo_data)
 
     if not is_valid:
         await waiting_msg.delete()
-        # Зберігаємо ID фото, щоб можна було відправити на ручну перевірку
         await state.update_data(last_photo_id=photo.file_id)
         
-        # Якщо помилка технічна - повідомляємо адміна
-        if "Помилка" in reason:
-             await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ <b>AI Error:</b> {reason}", parse_mode="HTML")
+        # --- ВАЖЛИВО: Шлемо звіт адміну про те, чому відмова ---
+        # Щоб ти бачив, що саме прочитав бот
+        report = (
+            f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n"
+            f"🤖 <b>Відповідь AI:</b>\n{ai_response[:300]}..." # Обрізаємо, якщо дуже довга
+        )
+        try:
+            await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
+        except: pass
 
         await message.answer(
             "⚠️ <b>Система не знайшла акційні товари.</b>\n\n"
             "Можливо, назва товару скорочена або фото нечітке.\n"
-            "Якщо ви впевнені, що це правильний чек — натисніть кнопку нижче, і менеджер перевірить його вручну.",
+            "Якщо ви впевнені, натисніть кнопку нижче для ручної перевірки.",
             reply_markup=get_manual_review_kb(),
             parse_mode="HTML"
         )
         return
 
     # 3. Якщо AI підтвердив - зберігаємо
-    await finalize_receipt(message, state, photo.file_id, "✅ AI Перевірка пройдена!")
+    await finalize_receipt(message, state, photo.file_id, f"✅ AI OK: {ai_response[:50]}...")
     await waiting_msg.delete()
 
 # Обробка кнопки "Ручна перевірка"
@@ -267,7 +268,7 @@ async def process_manual_review(call: CallbackQuery, state: FSMContext):
         await call.message.answer("Помилка: фото втрачено. Спробуйте завантажити знову.")
         return
 
-    await finalize_receipt(call.message, state, photo_id, "⚠️ РУЧНА ПЕРЕВІРКА (AI відхилив)")
+    await finalize_receipt(call.message, state, photo_id, "⚠️ РУЧНА ПЕРЕВІРКА (Клієнт наполягає)")
 
 # Допоміжна функція збереження даних
 async def finalize_receipt(message, state, photo_id, admin_status_text):
