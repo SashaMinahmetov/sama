@@ -25,12 +25,22 @@ GOOGLE_AI_KEY = os.environ.get("GOOGLE_AI_KEY")
 ADMIN_ID = "-1003731208847" 
 INSTAGRAM_LINK = "https://instagram.com/vash_account"
 
-# --- СПИСОК АКЦІЙНИХ ТОВАРІВ ---
+# --- СПИСОК ТОВАРІВ ---
 PROMO_PRODUCTS_LIST = [
     "ЛЮБИСТОК", "ТОРЧИН", "RIO", "MOLENDAM", "МОЛЕНДАМ", 
     "КЕТЧУП", "АНАНАСИ", "ШАМПІНЬЙОНИ", "ПРИПРАВА"
 ]
 PROMO_PRODUCTS_STR = ", ".join(PROMO_PRODUCTS_LIST)
+
+# --- СПИСОК МОДЕЛЕЙ ДЛЯ ПЕРЕБОРУ ---
+# Бот спробує їх по черзі, поки одна не спрацює
+MODELS_TO_TRY = [
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-001",
+    "gemini-1.5-flash-002",
+    "gemini-1.5-pro",
+    "gemini-pro-vision"
+]
 
 # --- ІНІЦІАЛІЗАЦІЯ ---
 bot = Bot(token=BOT_TOKEN)
@@ -43,7 +53,7 @@ storage = RedisStorage(redis=redis)
 dp = Dispatcher(storage=storage)
 app = FastAPI()
 
-# --- СТАНИ FSM ---
+# --- СТАНИ ---
 class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
@@ -82,61 +92,68 @@ def get_manual_review_kb():
         ]
     )
 
-# --- ФУНКЦІЯ ПЕРЕВІРКИ (GEMINI 2.0 FLASH) ---
+# --- ФУНКЦІЯ "ТЕРМІНАТОР" (ПЕРЕБІР МОДЕЛЕЙ) ---
 async def check_receipt_with_ai(photo_bytes):
     if not GOOGLE_AI_KEY:
         return False, "❌ Помилка: Немає API ключа"
     
-    # ВИКОРИСТОВУЄМО ТВОЮ МОДЕЛЬ ЗІ СПИСКУ
-    model_name = "gemini-2.0-flash" 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GOOGLE_AI_KEY}"
-    
-    try:
-        b64_image = base64.b64encode(photo_bytes).decode('utf-8')
-        
-        prompt_text = f"""
-        Analyze this receipt image.
-        Target Keywords: {PROMO_PRODUCTS_STR}
-        
-        INSTRUCTIONS:
-        1. Read ALL text from the receipt.
-        2. Check if ANY of the Target Keywords appear in the text (ignore case).
-        3. If FOUND: Start response with "YES" and list the word.
-        4. If NOT FOUND: Start response with "NO" and list 5-10 words you actually see.
-        """
+    b64_image = base64.b64encode(photo_bytes).decode('utf-8')
+    last_error = ""
 
-        payload = {
-            "contents": [{
-                "parts": [
-                    {"text": prompt_text},
-                    {"inline_data": {
-                        "mime_type": "image/jpeg", 
-                        "data": b64_image
-                    }}
-                ]
-            }]
-        }
+    # Проходимо по списку моделей
+    for model_name in MODELS_TO_TRY:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GOOGLE_AI_KEY}"
+        
+        try:
+            prompt_text = f"""
+            Analyze this receipt image.
+            Target Keywords: {PROMO_PRODUCTS_STR}
+            
+            INSTRUCTIONS:
+            1. Read ALL text from the receipt.
+            2. Check if ANY of the Target Keywords appear in the text (ignore case).
+            3. If FOUND: Start response with "YES" and list the word.
+            4. If NOT FOUND: Start response with "NO" and list 5-10 words you actually see.
+            """
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"text": prompt_text},
+                        {"inline_data": {
+                            "mime_type": "image/jpeg", 
+                            "data": b64_image
+                        }}
+                    ]
+                }]
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    
+                    # Якщо успіх (200) - виходимо з циклу і повертаємо результат
+                    if response.status == 200:
+                        result = await response.json()
+                        try:
+                            answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                            if answer.upper().startswith("YES"):
+                                return True, f"Model ({model_name}): {answer}"
+                            else:
+                                return False, f"Model ({model_name}): {answer}"
+                        except Exception:
+                            continue # Якщо JSON кривий, пробуємо наступну модель
+
+                    # Якщо помилка, записуємо її і йдемо далі
                     error_text = await response.text()
-                    return False, f"HTTP Error {response.status}: {error_text}"
-                
-                result = await response.json()
-                
-                try:
-                    answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
-                    if answer.upper().startswith("YES"):
-                        return True, answer
-                    else:
-                        return False, answer
-                except (KeyError, IndexError):
-                    return False, "Некоректна відповідь від AI (JSON parse error)"
+                    last_error = f"Model {model_name} Error {response.status}: {error_text}"
+                    logging.warning(f"Failed with {model_name}: {response.status}")
+                    
+        except Exception as e:
+            last_error = f"Exception with {model_name}: {str(e)}"
+            continue
 
-    except Exception as e:
-        logging.error(f"AI Check Error: {e}")
-        return False, f"Technical Error: {str(e)}"
+    # Якщо ми тут, значить жодна модель не спрацювала
+    return False, f"Всі моделі відмовили. Остання помилка: {last_error[:200]}"
 
 # --- ОБРОБНИКИ ---
 
@@ -246,7 +263,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         await state.update_data(last_photo_id=photo.file_id)
         
         # Звіт адміну
-        report = f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n🤖 <b>AI відповідь:</b>\n{ai_response[:800]}"
+        report = f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n🤖 <b>AI відповідь:</b>\n{ai_response[:500]}..."
         try:
             await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
         except: pass
