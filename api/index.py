@@ -24,14 +24,10 @@ GOOGLE_AI_KEY = os.environ.get("GOOGLE_AI_KEY")
 ADMIN_ID = "-1003731208847" 
 INSTAGRAM_LINK = "https://instagram.com/твой_аккаунт"
 
-# --- СПИСОК ТВОИХ ТОВАРОВ (Отредактируй этот список!) ---
+# --- СПИСОК ТВОИХ ТОВАРОВ ---
+# ВАЖНО: Чем точнее список, тем лучше работает AI
 PROMO_PRODUCTS = """
-Coca-Cola
-Pepsi
-Lays
-Milka
 ПРИПР ДО КАРТОПЛІ З0Г ЛЮБИСТОК
-(Сюда впиши ключевые слова твоих товаров)
 """
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
@@ -55,7 +51,6 @@ class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
     waiting_for_receipt = State()
-    # Дополнительное состояние не нужно, будем хранить file_id в данных
 
 # --- КЛАВІАТУРИ ---
 def get_main_reply_kb():
@@ -82,7 +77,6 @@ def get_inline_start_kb():
         ]
     )
 
-# НОВАЯ КЛАВИАТУРА ДЛЯ РУЧНОЙ ПРОВЕРКИ
 def get_manual_review_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -91,33 +85,43 @@ def get_manual_review_kb():
         ]
     )
 
-# --- ФУНКЦИЯ ПРОВЕРКИ ЧЕКА ЧЕРЕЗ AI ---
+# --- УЛУЧШЕННАЯ ФУНКЦИЯ ПРОВЕРКИ AI (СТРОГАЯ) ---
 async def check_receipt_with_ai(photo_bytes):
+    # 1. Если ключа нет — сразу говорим об ошибке
     if not GOOGLE_AI_KEY:
-        return True 
+        return False, "❌ Помилка на сервері: Відсутній GOOGLE_AI_KEY"
     
     try:
         image_part = {"mime_type": "image/jpeg", "data": photo_bytes}
+        
+        # Более строгий промпт
         prompt = f"""
-        Analyze this receipt image. 
-        Look for ANY of the following products in the text:
+        You are a receipt scanner bot.
+        Task: Look for ANY of the following products in the image text:
         {PROMO_PRODUCTS}
         
-        If you find AT LEAST ONE of these products (or very similar name), answer strictly: YES.
-        If none of these products are present, answer strictly: NO.
-        If it is not a receipt at all, answer: NO.
+        INSTRUCTIONS:
+        1. If you find at least one product from the list (or very similar name) -> Answer "YES"
+        2. If the image is NOT a receipt (e.g. a selfie, a cat, a street, a blurry blob) -> Answer "NO"
+        3. If it is a receipt but NO promo products are found -> Answer "NO"
+        
+        Answer ONLY "YES" or "NO". Do not write explanations.
         """
+        
         response = await asyncio.to_thread(model.generate_content, [prompt, image_part])
         answer = response.text.strip().upper()
+        
         if "YES" in answer:
-            return True
-        return False
+            return True, "OK"
+        else:
+            # Возвращаем False и то, что ответил AI (для отладки)
+            return False, f"AI відповів: {answer}"
+            
     except Exception as e:
         logging.error(f"AI Check Error: {e}")
-        return True 
+        return False, f"Технічна помилка AI: {str(e)}"
 
 # --- ЛОГИКА ---
-
 @dp.message(Command("start"))
 @dp.message(F.text == "❌ Скасувати")
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -125,7 +129,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
     await message.answer("Головне меню 👇", reply_markup=get_main_reply_kb())
     await message.answer("👋 <b>Вітаємо у розіграші!</b>", reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
-# Обработка кнопки "Скасувати" в инлайне
 @dp.callback_query(F.data == "cancel_upload")
 async def callback_cancel(call: CallbackQuery, state: FSMContext):
     await call.answer()
@@ -136,9 +139,9 @@ async def cmd_sendall(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
     text_to_send = message.text.replace("/sendall", "").strip()
     if not text_to_send:
-        await message.answer("Введіть текст розсилки.")
+        await message.answer("Введіть текст.")
         return
-    await message.answer("⏳ Розпочинаю розсилку...")
+    await message.answer("⏳ Розсилка...")
     keys = await redis.keys("user:*")
     success, error = 0, 0
     for key in keys:
@@ -147,11 +150,11 @@ async def cmd_sendall(message: types.Message):
             await bot.send_message(chat_id=int(uid), text=text_to_send, parse_mode="HTML")
             success += 1
         except: error += 1
-    await message.answer(f"✅ Розсилка: {success} успішно, {error} помилок.")
+    await message.answer(f"✅ Успішно: {success}, Помилок: {error}")
 
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules(message: types.Message):
-    await message.answer(f"Купуйте товари зі списку:\n{PROMO_PRODUCTS}\nЗавантажуйте чек та вигравайте!", parse_mode="HTML")
+    await message.answer(f"Купуйте: {PROMO_PRODUCTS}\nЗавантажуйте чек та вигравайте!", parse_mode="HTML")
 
 @dp.message(F.text == "👤 Мій кабінет")
 async def show_cabinet_msg(message: types.Message):
@@ -186,7 +189,7 @@ async def process_start_upload(target_message, user_id, state):
         await target_message.answer("Введіть ПІБ:", reply_markup=get_cancel_kb())
         await state.set_state(Registration.waiting_for_fio)
     else:
-        await target_message.answer("📸 Надішліть фото чека (система перевірить наявність акційного товару).", reply_markup=get_cancel_kb())
+        await target_message.answer("📸 Надішліть фото чека.", reply_markup=get_cancel_kb())
         await state.set_state(Registration.waiting_for_receipt)
 
 @dp.message(Registration.waiting_for_fio)
@@ -205,7 +208,7 @@ async def process_phone(message: types.Message, state: FSMContext):
     await message.answer("✅ Реєстрація успішна! Надішліть фото чека.", reply_markup=get_cancel_kb())
     await state.set_state(Registration.waiting_for_receipt)
 
-# --- ПРИЕМ ФОТО (ГЛАВНАЯ ЛОГИКА) ---
+# --- ОБРАБОТКА ФОТО (С ОТЛАДКОЙ) ---
 @dp.message(Registration.waiting_for_receipt, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     waiting_msg = await message.answer("⏳ <b>Штучний інтелект перевіряє ваш чек...</b>", parse_mode="HTML")
@@ -216,46 +219,42 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     await bot.download_file(file_info.file_path, destination=photo_bytes)
     photo_data = photo_bytes.getvalue()
 
-    is_valid = await check_receipt_with_ai(photo_data)
+    # --- ПРОВЕРКА ---
+    is_valid, reason = await check_receipt_with_ai(photo_data)
 
     if not is_valid:
         await waiting_msg.delete()
-        # СОХРАНЯЕМ ID ФОТО В ПАМЯТЬ, ЧТОБЫ ПОТОМ ЕГО ДОСТАТЬ
         await state.update_data(last_photo_id=photo.file_id)
         
+        # Отправляем админу инфу, почему бот отказал (чтобы ты видел, работает ли AI)
+        if "Технічна помилка" in reason or "Немає API ключа" in reason:
+             await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ <b>Проблема з AI:</b>\n{reason}", parse_mode="HTML")
+
         await message.answer(
             "⚠️ <b>Система не знайшла акційні товари.</b>\n\n"
-            "Можливо, фото нечітке або товар називається інакше.\n"
-            "Якщо ви впевнені, що це правильний чек — натисніть кнопку нижче для ручної перевірки адміном.",
+            "Можливо, фото нечітке або ви завантажили не чек.\n"
+            "Якщо ви впевнені, натисніть кнопку нижче для ручної перевірки.",
             reply_markup=get_manual_review_kb(),
             parse_mode="HTML"
         )
         return
 
-    # Если AI сказал ДА - сохраняем сразу
+    # Если OK
     await finalize_receipt(message, state, photo.file_id, "✅ AI Перевірка пройдена!")
     await waiting_msg.delete()
 
-# --- ОБРАБОТКА КНОПКИ "ОТПРАВИТЬ НА РУЧНУЮ ПРОВЕРКУ" ---
 @dp.callback_query(F.data == "force_manual_review")
 async def process_manual_review(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    
-    # Достаем ID фото из памяти
     data = await state.get_data()
     photo_id = data.get("last_photo_id")
-    
     if not photo_id:
-        await call.message.answer("Помилка: фото втрачено. Завантажте знову.")
+        await call.message.answer("Помилка: фото втрачено.")
         return
+    await finalize_receipt(call.message, state, photo_id, "⚠️ РУЧНА ПЕРЕВІРКА (AI відхилив)")
 
-    # Запускаем сохранение, но с другим статусом для админа
-    await finalize_receipt(call.message, state, photo_id, "⚠️ РУЧНА ПЕРЕВІРКА (AI не побачив товар)")
-
-# --- ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ СОХРАНЕНИЯ ---
 async def finalize_receipt(message, state, photo_id, admin_status_text):
-    user_id = message.chat.id # Тут используем chat.id, так как может быть callback
-    
+    user_id = message.chat.id
     user_data = await redis.hgetall(f"user:{user_id}")
     fio = user_data.get(b'fio', b'').decode('utf-8')
     phone = user_data.get(b'phone', b'').decode('utf-8')
@@ -265,7 +264,6 @@ async def finalize_receipt(message, state, photo_id, admin_status_text):
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
 
-    # Отправка админу
     try:
         await bot.send_photo(
             chat_id=ADMIN_ID, 
@@ -276,21 +274,16 @@ async def finalize_receipt(message, state, photo_id, admin_status_text):
     except Exception as e:
         logging.error(f"Error sending to admin: {e}")
 
-    # Google Таблица
     if GOOGLE_WEBHOOK_URL:
         try:
             async with aiohttp.ClientSession() as session:
                 await session.post(GOOGLE_WEBHOOK_URL, json={"fio": fio, "phone": phone, "username": username, "receipt_number": new_count})
         except: pass
 
-    # Ответ пользователю
-    # Если это был callback (нажатие кнопки), редактируем старое сообщение
     if isinstance(message, types.Message): 
-        # Если это было обычное фото
         await message.answer(f"✅ <b>Чек прийнято!</b> (№{new_count})", reply_markup=get_main_reply_kb(), parse_mode="HTML")
     else:
-        # Если это был клик по кнопке (message здесь технически - объект сообщения, на котором была кнопка)
-        await message.answer(f"✅ <b>Чек відправлено на перевірку адміністратору!</b> (№{new_count})", reply_markup=get_main_reply_kb(), parse_mode="HTML")
+        await message.answer(f"✅ <b>Відправлено адміністратору!</b> (№{new_count})", reply_markup=get_main_reply_kb(), parse_mode="HTML")
     
     await state.set_state(None)
 
