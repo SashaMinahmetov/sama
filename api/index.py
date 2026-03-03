@@ -3,6 +3,7 @@ import logging
 import aiohttp
 import asyncio
 import base64
+import json
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -81,17 +82,31 @@ def get_manual_review_kb():
         ]
     )
 
-# --- НОВА ФУНКЦІЯ ПЕРЕВІРКИ (REST API) ---
-# Працює напряму, без бібліотек
+# --- ДОДАТКОВА ФУНКЦІЯ: СПИСОК МОДЕЛЕЙ (ДЛЯ ДЕБАГУ) ---
+async def get_available_models():
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GOOGLE_AI_KEY}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Фільтруємо ті, що підтримують generateContent
+                    models = [m['name'] for m in data.get('models', []) if 'generateContent' in m.get('supportedGenerationMethods', [])]
+                    return "\n".join(models[:10]) # Повертаємо перші 10
+                return f"Error getting models: {response.status}"
+    except Exception as e:
+        return f"Exception getting models: {str(e)}"
+
+# --- ФУНКЦІЯ ПЕРЕВІРКИ (REST API v1beta) ---
 async def check_receipt_with_ai(photo_bytes):
     if not GOOGLE_AI_KEY:
         return False, "❌ Помилка: Немає API ключа"
     
-    # Використовуємо модель Flash 1.5 напряму через URL
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_AI_KEY}"
+    # СПРОБА 1: Використовуємо 'gemini-1.5-flash-latest' (часто допомагає)
+    model_name = "gemini-1.5-flash-latest" 
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GOOGLE_AI_KEY}"
     
     try:
-        # Кодуємо картинку в base64
         b64_image = base64.b64encode(photo_bytes).decode('utf-8')
         
         prompt_text = f"""
@@ -121,11 +136,16 @@ async def check_receipt_with_ai(photo_bytes):
             async with session.post(url, json=payload) as response:
                 if response.status != 200:
                     error_text = await response.text()
+                    
+                    # ЯКЩО ЗНОВУ 404 - ДИВИМОСЬ ЯКІ МОДЕЛІ ДОСТУПНІ
+                    if response.status == 404:
+                        available_models = await get_available_models()
+                        return False, f"404 Model Not Found.\nДоступні моделі:\n{available_models}"
+                    
                     return False, f"HTTP Error {response.status}: {error_text}"
                 
                 result = await response.json()
                 
-                # Розбираємо відповідь Google
                 try:
                     answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
                     if answer.upper().startswith("YES"):
@@ -246,8 +266,8 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         await waiting_msg.delete()
         await state.update_data(last_photo_id=photo.file_id)
         
-        # Звіт адміну
-        report = f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n🤖 <b>AI бачить:</b>\n{ai_response[:500]}..."
+        # Звіт адміну (тепер з повним дебагом!)
+        report = f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n🤖 <b>AI відповідь:</b>\n{ai_response[:800]}"
         try:
             await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
         except: pass
