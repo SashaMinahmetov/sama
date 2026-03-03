@@ -32,14 +32,14 @@ PROMO_PRODUCTS_LIST = [
 ]
 PROMO_PRODUCTS_STR = ", ".join(PROMO_PRODUCTS_LIST)
 
-# --- СПИСОК МОДЕЛЕЙ ДЛЯ ПЕРЕБОРУ ---
-# Бот спробує їх по черзі, поки одна не спрацює
+# --- СПИСОК МОДЕЛЕЙ (ОНОВЛЕНИЙ ПІД ТВІЙ АКАУНТ) ---
+# Ставимо Lite першою, бо вона найімовірніше безкоштовна
 MODELS_TO_TRY = [
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-001",
-    "gemini-1.5-flash-002",
-    "gemini-1.5-pro",
-    "gemini-pro-vision"
+    "gemini-2.0-flash-lite-001",
+    "gemini-2.0-flash-lite",
+    "gemini-2.0-flash-001",
+    "gemini-2.5-flash", 
+    "gemini-2.0-flash"
 ]
 
 # --- ІНІЦІАЛІЗАЦІЯ ---
@@ -92,7 +92,7 @@ def get_manual_review_kb():
         ]
     )
 
-# --- ФУНКЦІЯ "ТЕРМІНАТОР" (ПЕРЕБІР МОДЕЛЕЙ) ---
+# --- ФУНКЦІЯ ПЕРЕВІРКИ (REST API - TERMINATOR MODE) ---
 async def check_receipt_with_ai(photo_bytes):
     if not GOOGLE_AI_KEY:
         return False, "❌ Помилка: Немає API ключа"
@@ -131,7 +131,7 @@ async def check_receipt_with_ai(photo_bytes):
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, json=payload) as response:
                     
-                    # Якщо успіх (200) - виходимо з циклу і повертаємо результат
+                    # 200 = Успіх
                     if response.status == 200:
                         result = await response.json()
                         try:
@@ -141,19 +141,20 @@ async def check_receipt_with_ai(photo_bytes):
                             else:
                                 return False, f"Model ({model_name}): {answer}"
                         except Exception:
-                            continue # Якщо JSON кривий, пробуємо наступну модель
+                            continue 
 
-                    # Якщо помилка, записуємо її і йдемо далі
+                    # Якщо помилка квоти (429) або не знайдено (404) - йдемо до наступної моделі
                     error_text = await response.text()
-                    last_error = f"Model {model_name} Error {response.status}: {error_text}"
-                    logging.warning(f"Failed with {model_name}: {response.status}")
+                    last_error = f"{model_name}: {response.status}"
+                    # logging.warning(f"Failed {model_name}: {error_text}")
+                    continue
                     
         except Exception as e:
-            last_error = f"Exception with {model_name}: {str(e)}"
+            last_error = f"Exception {model_name}: {str(e)}"
             continue
 
-    # Якщо ми тут, значить жодна модель не спрацювала
-    return False, f"Всі моделі відмовили. Остання помилка: {last_error[:200]}"
+    # Якщо нічого не спрацювало
+    return False, f"Всі моделі відмовили. Остання: {last_error}"
 
 # --- ОБРОБНИКИ ---
 
