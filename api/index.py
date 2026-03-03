@@ -25,7 +25,6 @@ ADMIN_ID = "-1003731208847"
 INSTAGRAM_LINK = "https://instagram.com/твой_аккаунт"
 
 # --- СПИСОК АКЦІЙНИХ ТОВАРІВ ---
-# Форматуємо в один рядок для кращого розуміння AI
 PROMO_PRODUCTS_LIST = [
     "ЛЮБИСТОК", "ТОРЧИН", "RIO", "MOLENDAM", "МОЛЕНДАМ", 
     "КЕТЧУП", "АНАНАСИ", "ШАМПІНЬЙОНИ", "ПРИПРАВА"
@@ -46,9 +45,8 @@ app = FastAPI()
 # Налаштування AI Gemini
 if GOOGLE_AI_KEY:
     genai.configure(api_key=GOOGLE_AI_KEY)
-    # ВАЖЛИВО: Змінюємо 'flash' на 'pro' для кращого зору
-    # Якщо pro буде падати з помилкою квоти, зміни назад на 'gemini-1.5-flash'
-    model = genai.GenerativeModel('gemini-1.5-pro')
+    # Повертаємо Flash, бо Pro недоступна, але оновлюємо версію ліби
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
 # --- СТАНИ FSM ---
 class Registration(StatesGroup):
@@ -89,7 +87,7 @@ def get_manual_review_kb():
         ]
     )
 
-# --- ФУНКЦІЯ ПЕРЕВІРКИ ЧЕКА (AI GEMINI PRO) ---
+# --- ФУНКЦІЯ ПЕРЕВІРКИ ЧЕКА (AI GEMINI FLASH) ---
 async def check_receipt_with_ai(photo_bytes):
     if not GOOGLE_AI_KEY:
         return False, "❌ Помилка: Немає API ключа"
@@ -97,30 +95,30 @@ async def check_receipt_with_ai(photo_bytes):
     try:
         image_part = {"mime_type": "image/jpeg", "data": photo_bytes}
         
-        # Більш детальний промпт
+        # Промпт: "Якщо не знайшов - напиши, що ти взагалі побачив"
         prompt = f"""
         Analyze this image carefully. It is a store receipt.
         
         Target Keywords: {PROMO_PRODUCTS_STR}
         
-        Step 1: Read ALL text from the receipt.
-        Step 2: Check if ANY of the Target Keywords appear in the text.
-        Step 3: Ignore case and small typos (e.g. "30Г" vs "З0Г").
+        INSTRUCTIONS:
+        1. Read ALL text from the receipt.
+        2. Check if ANY of the Target Keywords appear in the text.
+        3. Ignore case (upper/lower) and small typos.
         
         OUTPUT FORMAT:
-        If FOUND: Start response with "YES". Then list what you found.
-        If NOT FOUND: Start response with "NO". Then list 5-10 main products you actually saw on the receipt (for debugging).
+        - If FOUND: Start with "YES". Then list the product.
+        - If NOT FOUND: Start with "NO". Then list 10-20 words/products you actually see on the receipt (I need this for debugging).
         """
         
-        # Виконуємо запит (це може зайняти 3-5 секунд)
+        # Flash працює швидко
         response = await asyncio.to_thread(model.generate_content, [prompt, image_part])
         answer = response.text.strip()
         
-        # Логіка визначення
         if answer.upper().startswith("YES"):
-            return True, answer # Повертаємо повну відповідь для логів
+            return True, answer 
         else:
-            return False, answer # Повертаємо пояснення, що він там побачив
+            return False, answer 
             
     except Exception as e:
         logging.error(f"AI Check Error: {e}")
@@ -218,7 +216,7 @@ async def process_phone(message: types.Message, state: FSMContext):
 # --- ГОЛОВНА ЛОГІКА ОБРОБКИ ФОТО ---
 @dp.message(Registration.waiting_for_receipt, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
-    waiting_msg = await message.answer("⏳ <b>AI сканує чек... (це може зайняти до 5 сек)</b>", parse_mode="HTML")
+    waiting_msg = await message.answer("⏳ <b>AI сканує чек...</b>", parse_mode="HTML")
     
     # 1. Завантажуємо фото
     photo = message.photo[-1]
@@ -234,11 +232,10 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         await waiting_msg.delete()
         await state.update_data(last_photo_id=photo.file_id)
         
-        # --- ВАЖЛИВО: Шлемо звіт адміну про те, чому відмова ---
-        # Щоб ти бачив, що саме прочитав бот
+        # --- ВАЖЛИВО: Шлемо звіт адміну ---
         report = (
             f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n"
-            f"🤖 <b>Відповідь AI:</b>\n{ai_response[:300]}..." # Обрізаємо, якщо дуже довга
+            f"🤖 <b>Відповідь AI (Що він побачив):</b>\n{ai_response[:500]}..." 
         )
         try:
             await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
@@ -278,7 +275,6 @@ async def finalize_receipt(message, state, photo_id, admin_status_text):
     phone = user_data.get(b'phone', b'').decode('utf-8')
     username = f"@{message.chat.username}" if message.chat.username else "Немає"
 
-    # Збільшуємо лічильник чеків
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
@@ -306,13 +302,11 @@ async def finalize_receipt(message, state, photo_id, admin_status_text):
                 })
         except: pass
 
-    # Відповідь користувачу
     success_text = f"✅ <b>Чек прийнято!</b> (Ваш чек №{new_count})\nДякуємо за участь!"
     
     if isinstance(message, types.Message): 
         await message.answer(success_text, reply_markup=get_main_reply_kb(), parse_mode="HTML")
     else:
-        # Якщо це callback від кнопки
         await message.answer(f"✅ <b>Чек відправлено адміністратору!</b> (№{new_count})", reply_markup=get_main_reply_kb(), parse_mode="HTML")
     
     await state.set_state(None)
