@@ -22,7 +22,7 @@ REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 GOOGLE_AI_KEY = os.environ.get("GOOGLE_AI_KEY") 
 ADMIN_ID = "-1003731208847" 
-INSTAGRAM_LINK = "https://instagram.com/твой_аккаунт"
+INSTAGRAM_LINK = "https://instagram.com/vash_account"
 
 # --- СПИСОК АКЦІЙНИХ ТОВАРІВ ---
 PROMO_PRODUCTS_LIST = [
@@ -45,8 +45,8 @@ app = FastAPI()
 # Налаштування AI Gemini
 if GOOGLE_AI_KEY:
     genai.configure(api_key=GOOGLE_AI_KEY)
-    # Повертаємо Flash, бо Pro недоступна, але оновлюємо версію ліби
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # ВИКОРИСТОВУЄМО МОДЕЛЬ, ЯКА ПРАЦЮЄ ВСЮДИ
+    model = genai.GenerativeModel('gemini-pro-vision')
 
 # --- СТАНИ FSM ---
 class Registration(StatesGroup):
@@ -87,31 +87,29 @@ def get_manual_review_kb():
         ]
     )
 
-# --- ФУНКЦІЯ ПЕРЕВІРКИ ЧЕКА (AI GEMINI FLASH) ---
+# --- ФУНКЦІЯ ПЕРЕВІРКИ ЧЕКА (GEMINI PRO VISION) ---
 async def check_receipt_with_ai(photo_bytes):
     if not GOOGLE_AI_KEY:
         return False, "❌ Помилка: Немає API ключа"
     
     try:
+        # Для старої моделі формат передачі трохи інший, але цей має спрацювати
         image_part = {"mime_type": "image/jpeg", "data": photo_bytes}
         
-        # Промпт: "Якщо не знайшов - напиши, що ти взагалі побачив"
         prompt = f"""
-        Analyze this image carefully. It is a store receipt.
-        
+        Look at this receipt image.
         Target Keywords: {PROMO_PRODUCTS_STR}
         
-        INSTRUCTIONS:
-        1. Read ALL text from the receipt.
-        2. Check if ANY of the Target Keywords appear in the text.
-        3. Ignore case (upper/lower) and small typos.
+        Task:
+        1. Read the text.
+        2. Find if ANY Target Keyword is present.
+        3. Ignore case and small typos.
         
-        OUTPUT FORMAT:
-        - If FOUND: Start with "YES". Then list the product.
-        - If NOT FOUND: Start with "NO". Then list 10-20 words/products you actually see on the receipt (I need this for debugging).
+        Output "YES" if found, "NO" if not found.
+        If NO, list 5 main words you see.
         """
         
-        # Flash працює швидко
+        # gemini-pro-vision вимагає список [prompt, image]
         response = await asyncio.to_thread(model.generate_content, [prompt, image_part])
         answer = response.text.strip()
         
@@ -122,9 +120,10 @@ async def check_receipt_with_ai(photo_bytes):
             
     except Exception as e:
         logging.error(f"AI Check Error: {e}")
-        return False, f"Технічна помилка AI: {str(e)}"
+        # Якщо модель перевантажена або помилка - все одно повертаємо текст помилки
+        return False, f"Error: {str(e)}"
 
-# --- ОБРОБНИКИ (HANDLERS) ---
+# --- ОБРОБНИКИ ---
 
 @dp.message(Command("start"))
 @dp.message(F.text == "❌ Скасувати")
@@ -143,9 +142,9 @@ async def cmd_sendall(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
     text_to_send = message.text.replace("/sendall", "").strip()
     if not text_to_send:
-        await message.answer("Введіть текст розсилки.")
+        await message.answer("Введіть текст.")
         return
-    await message.answer("⏳ Розпочинаю розсилку...")
+    await message.answer("⏳ Розсилка...")
     keys = await redis.keys("user:*")
     success, error = 0, 0
     for key in keys:
@@ -154,7 +153,7 @@ async def cmd_sendall(message: types.Message):
             await bot.send_message(chat_id=int(uid), text=text_to_send, parse_mode="HTML")
             success += 1
         except: error += 1
-    await message.answer(f"✅ Результат розсилки:\nУспішно: {success}\nНе доставлено: {error}")
+    await message.answer(f"✅ Успішно: {success}, Помилок: {error}")
 
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules(message: types.Message):
@@ -194,14 +193,14 @@ async def process_start_upload(target_message, user_id, state):
         await target_message.answer("📝 Введіть ваше Прізвище та Ім'я:", reply_markup=get_cancel_kb())
         await state.set_state(Registration.waiting_for_fio)
     else:
-        await target_message.answer("📸 Надішліть фото чека (система автоматично перевірить наявність товару).", reply_markup=get_cancel_kb())
+        await target_message.answer("📸 Надішліть фото чека.", reply_markup=get_cancel_kb())
         await state.set_state(Registration.waiting_for_receipt)
 
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     await state.update_data(fio=message.text)
     kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Поділитися номером", request_contact=True)]], resize_keyboard=True)
-    await message.answer("Чудово! Натисніть кнопку, щоб поділитися номером:", reply_markup=kb)
+    await message.answer("Чудово! Натисніть кнопку:", reply_markup=kb)
     await state.set_state(Registration.waiting_for_phone)
 
 @dp.message(Registration.waiting_for_phone)
@@ -210,64 +209,54 @@ async def process_phone(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     user_id = message.from_user.id
     await redis.hset(f"user:{user_id}", mapping={"fio": fsm_data.get("fio"), "phone": phone, "receipts": 0})
-    await message.answer("✅ Реєстрація успішна! Тепер надішліть фото чека 📸", reply_markup=get_cancel_kb())
+    await message.answer("✅ Реєстрація успішна! Надішліть фото чека 📸", reply_markup=get_cancel_kb())
     await state.set_state(Registration.waiting_for_receipt)
 
-# --- ГОЛОВНА ЛОГІКА ОБРОБКИ ФОТО ---
+# --- ОБРОБКА ФОТО ---
 @dp.message(Registration.waiting_for_receipt, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
-    waiting_msg = await message.answer("⏳ <b>AI сканує чек...</b>", parse_mode="HTML")
+    waiting_msg = await message.answer("⏳ <b>Перевірка чека...</b>", parse_mode="HTML")
     
-    # 1. Завантажуємо фото
     photo = message.photo[-1]
     file_info = await bot.get_file(photo.file_id)
     photo_bytes = BytesIO()
     await bot.download_file(file_info.file_path, destination=photo_bytes)
     photo_data = photo_bytes.getvalue()
 
-    # 2. Перевіряємо через Gemini AI
+    # Перевірка
     is_valid, ai_response = await check_receipt_with_ai(photo_data)
 
     if not is_valid:
         await waiting_msg.delete()
         await state.update_data(last_photo_id=photo.file_id)
         
-        # --- ВАЖЛИВО: Шлемо звіт адміну ---
-        report = (
-            f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n"
-            f"🤖 <b>Відповідь AI (Що він побачив):</b>\n{ai_response[:500]}..." 
-        )
+        # Звіт адміну
+        report = f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n🤖 <b>AI бачить:</b>\n{ai_response[:500]}..."
         try:
             await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
         except: pass
 
         await message.answer(
-            "⚠️ <b>Система не знайшла акційні товари.</b>\n\n"
-            "Можливо, назва товару скорочена або фото нечітке.\n"
-            "Якщо ви впевнені, натисніть кнопку нижче для ручної перевірки.",
+            "⚠️ <b>Товар не знайдено.</b>\nЯкщо ви впевнені, натисніть кнопку для ручної перевірки.",
             reply_markup=get_manual_review_kb(),
             parse_mode="HTML"
         )
         return
 
-    # 3. Якщо AI підтвердив - зберігаємо
+    # Збереження
     await finalize_receipt(message, state, photo.file_id, f"✅ AI OK: {ai_response[:50]}...")
     await waiting_msg.delete()
 
-# Обробка кнопки "Ручна перевірка"
 @dp.callback_query(F.data == "force_manual_review")
 async def process_manual_review(call: CallbackQuery, state: FSMContext):
     await call.answer()
     data = await state.get_data()
     photo_id = data.get("last_photo_id")
-    
     if not photo_id:
-        await call.message.answer("Помилка: фото втрачено. Спробуйте завантажити знову.")
+        await call.message.answer("Помилка: фото втрачено.")
         return
+    await finalize_receipt(call.message, state, photo_id, "⚠️ РУЧНА ПЕРЕВІРКА")
 
-    await finalize_receipt(call.message, state, photo_id, "⚠️ РУЧНА ПЕРЕВІРКА (Клієнт наполягає)")
-
-# Допоміжна функція збереження даних
 async def finalize_receipt(message, state, photo_id, admin_status_text):
     user_id = message.chat.id
     user_data = await redis.hgetall(f"user:{user_id}")
@@ -279,7 +268,6 @@ async def finalize_receipt(message, state, photo_id, admin_status_text):
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
 
-    # Відправка в адмін-групу
     try:
         await bot.send_photo(
             chat_id=ADMIN_ID, 
@@ -290,41 +278,31 @@ async def finalize_receipt(message, state, photo_id, admin_status_text):
     except Exception as e:
         logging.error(f"Error sending to admin: {e}")
 
-    # Відправка в Google Таблицю
     if GOOGLE_WEBHOOK_URL:
         try:
             async with aiohttp.ClientSession() as session:
                 await session.post(GOOGLE_WEBHOOK_URL, json={
-                    "fio": fio, 
-                    "phone": phone, 
-                    "username": username, 
-                    "receipt_number": new_count
+                    "fio": fio, "phone": phone, "username": username, "receipt_number": new_count
                 })
         except: pass
 
-    success_text = f"✅ <b>Чек прийнято!</b> (Ваш чек №{new_count})\nДякуємо за участь!"
-    
+    success_msg = f"✅ <b>Чек прийнято!</b> (№{new_count})"
     if isinstance(message, types.Message): 
-        await message.answer(success_text, reply_markup=get_main_reply_kb(), parse_mode="HTML")
+        await message.answer(success_msg, reply_markup=get_main_reply_kb(), parse_mode="HTML")
     else:
-        await message.answer(f"✅ <b>Чек відправлено адміністратору!</b> (№{new_count})", reply_markup=get_main_reply_kb(), parse_mode="HTML")
+        await message.answer(success_msg, reply_markup=get_main_reply_kb(), parse_mode="HTML")
     
     await state.set_state(None)
 
 @dp.message(Registration.waiting_for_receipt, F.text)
 async def error_receipt_format(message: types.Message):
-    await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸", parse_mode="HTML")
+    await message.answer("Надішліть ФОТО 📸")
 
-# --- WEBHOOK ДЛЯ VERCEL ---
 @app.get("/")
 async def health_check(): return {"status": "ok"}
 
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
-    try:
-        update = types.Update(**await request.json())
-        await dp.feed_update(bot, update)
-        return {"status": "ok"}
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        return {"status": "error"}
+    update = types.Update(**await request.json())
+    await dp.feed_update(bot, update)
+    return {"status": "ok"}
