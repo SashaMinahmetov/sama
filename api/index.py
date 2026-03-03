@@ -2,6 +2,7 @@ import os
 import logging
 import aiohttp
 import asyncio
+import base64
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -13,7 +14,6 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
 from redis.asyncio import Redis
-import google.generativeai as genai
 from io import BytesIO
 
 # --- НАЛАШТУВАННЯ ---
@@ -41,12 +41,6 @@ redis = Redis.from_url(REDIS_URL)
 storage = RedisStorage(redis=redis)
 dp = Dispatcher(storage=storage)
 app = FastAPI()
-
-# Налаштування AI Gemini
-if GOOGLE_AI_KEY:
-    genai.configure(api_key=GOOGLE_AI_KEY)
-    # ВИКОРИСТОВУЄМО МОДЕЛЬ, ЯКА ПРАЦЮЄ ВСЮДИ
-    model = genai.GenerativeModel('gemini-pro-vision')
 
 # --- СТАНИ FSM ---
 class Registration(StatesGroup):
@@ -87,41 +81,63 @@ def get_manual_review_kb():
         ]
     )
 
-# --- ФУНКЦІЯ ПЕРЕВІРКИ ЧЕКА (GEMINI PRO VISION) ---
+# --- НОВА ФУНКЦІЯ ПЕРЕВІРКИ (REST API) ---
+# Працює напряму, без бібліотек
 async def check_receipt_with_ai(photo_bytes):
     if not GOOGLE_AI_KEY:
         return False, "❌ Помилка: Немає API ключа"
     
+    # Використовуємо модель Flash 1.5 напряму через URL
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GOOGLE_AI_KEY}"
+    
     try:
-        # Для старої моделі формат передачі трохи інший, але цей має спрацювати
-        image_part = {"mime_type": "image/jpeg", "data": photo_bytes}
+        # Кодуємо картинку в base64
+        b64_image = base64.b64encode(photo_bytes).decode('utf-8')
         
-        prompt = f"""
-        Look at this receipt image.
+        prompt_text = f"""
+        Analyze this receipt image.
         Target Keywords: {PROMO_PRODUCTS_STR}
         
-        Task:
-        1. Read the text.
-        2. Find if ANY Target Keyword is present.
-        3. Ignore case and small typos.
-        
-        Output "YES" if found, "NO" if not found.
-        If NO, list 5 main words you see.
+        INSTRUCTIONS:
+        1. Read ALL text from the receipt.
+        2. Check if ANY of the Target Keywords appear in the text (ignore case).
+        3. If FOUND: Start response with "YES" and list the word.
+        4. If NOT FOUND: Start response with "NO" and list 5-10 words you actually see.
         """
-        
-        # gemini-pro-vision вимагає список [prompt, image]
-        response = await asyncio.to_thread(model.generate_content, [prompt, image_part])
-        answer = response.text.strip()
-        
-        if answer.upper().startswith("YES"):
-            return True, answer 
-        else:
-            return False, answer 
-            
+
+        payload = {
+            "contents": [{
+                "parts": [
+                    {"text": prompt_text},
+                    {"inline_data": {
+                        "mime_type": "image/jpeg", 
+                        "data": b64_image
+                    }}
+                ]
+            }]
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload) as response:
+                if response.status != 200:
+                    error_text = await response.text()
+                    return False, f"HTTP Error {response.status}: {error_text}"
+                
+                result = await response.json()
+                
+                # Розбираємо відповідь Google
+                try:
+                    answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
+                    if answer.upper().startswith("YES"):
+                        return True, answer
+                    else:
+                        return False, answer
+                except (KeyError, IndexError):
+                    return False, "Некоректна відповідь від AI (JSON parse error)"
+
     except Exception as e:
         logging.error(f"AI Check Error: {e}")
-        # Якщо модель перевантажена або помилка - все одно повертаємо текст помилки
-        return False, f"Error: {str(e)}"
+        return False, f"Technical Error: {str(e)}"
 
 # --- ОБРОБНИКИ ---
 
@@ -193,7 +209,7 @@ async def process_start_upload(target_message, user_id, state):
         await target_message.answer("📝 Введіть ваше Прізвище та Ім'я:", reply_markup=get_cancel_kb())
         await state.set_state(Registration.waiting_for_fio)
     else:
-        await target_message.answer("📸 Надішліть фото чека.", reply_markup=get_cancel_kb())
+        await target_message.answer("📸 Надішліть фото чека (система автоматично перевірить наявність товару).", reply_markup=get_cancel_kb())
         await state.set_state(Registration.waiting_for_receipt)
 
 @dp.message(Registration.waiting_for_fio)
@@ -209,13 +225,13 @@ async def process_phone(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     user_id = message.from_user.id
     await redis.hset(f"user:{user_id}", mapping={"fio": fsm_data.get("fio"), "phone": phone, "receipts": 0})
-    await message.answer("✅ Реєстрація успішна! Надішліть фото чека 📸", reply_markup=get_cancel_kb())
+    await message.answer("✅ Реєстрація успішна! Тепер надішліть фото чека 📸", reply_markup=get_cancel_kb())
     await state.set_state(Registration.waiting_for_receipt)
 
 # --- ОБРОБКА ФОТО ---
 @dp.message(Registration.waiting_for_receipt, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
-    waiting_msg = await message.answer("⏳ <b>Перевірка чека...</b>", parse_mode="HTML")
+    waiting_msg = await message.answer("⏳ <b>AI сканує чек...</b>", parse_mode="HTML")
     
     photo = message.photo[-1]
     file_info = await bot.get_file(photo.file_id)
