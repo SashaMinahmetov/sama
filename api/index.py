@@ -2,6 +2,7 @@ import os
 import logging
 import aiohttp
 import asyncio
+from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -88,12 +89,27 @@ async def process_show_cabinet(target_message, user_id: int):
     ig = user_data.get(b'ig', b'').decode('utf-8')
     receipts_count = user_data.get(b'receipts', b'0').decode('utf-8')
 
+    # Отримуємо історію чеків з бази
+    history_items = await redis.lrange(f"user_receipts:{user_id}", 0, -1)
+    history_text = ""
+    if history_items:
+        history_text = "\n\n📋 <b>Історія ваших чеків:</b>\n"
+        for item in history_items:
+            try:
+                date_str, rec_num = item.decode('utf-8').split('|', 1)
+                history_text += f"🔹 {date_str} — № {rec_num}\n"
+            except:
+                pass
+    else:
+        history_text = "\n\n📋 <b>Історія ваших чеків:</b>\nПоки що порожньо."
+
     cabinet_text = (
         "👤 <b>Ваш особистий кабінет:</b>\n\n"
         f"🔸 <b>ПІБ:</b> {fio}\n"
         f"🔸 <b>Телефон:</b> {phone}\n"
         f"🔸 <b>Instagram:</b> {ig}\n"
-        f"🎫 <b>Зареєстровано чеків:</b> {receipts_count}\n\n"
+        f"🎫 <b>Успішно схвалено чеків:</b> {receipts_count}"
+        f"{history_text}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
     await target_message.answer(cabinet_text, parse_mode="HTML")
@@ -196,7 +212,7 @@ async def cmd_sendall(message: types.Message):
             error_count += 1
     await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Доставлено: {success_count}\n🔴 Помилок: {error_count}", parse_mode="HTML")
 
-# ОБРОБНИКИ ДЛЯ УМОВ ТА FAQ (КНОПКИ ТА INLINE)
+# ОБРОБНИКИ ДЛЯ УМОВ ТА FAQ
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules_msg(message: types.Message):
     await process_show_rules(message)
@@ -370,7 +386,7 @@ async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
 
-# --- ПРИЙОМ ФОТО ---
+# --- ПРИЙОМ ФОТО: МОМЕНТАЛЬНЕ ПОВІДОМЛЕННЯ + ЗАПИС ІСТОРІЇ ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -384,14 +400,28 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
+    # Записуємо номер в базу (щоб уникнути дублікатів) і зберігаємо історію
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
+        # Додаємо запис в історію з поточним часом (Київський час: UTC+2)
+        kyiv_time = datetime.utcnow() + timedelta(hours=2)
+        now_str = kyiv_time.strftime("%d.%m.%Y %H:%M")
+        await redis.rpush(f"user_receipts:{user_id}", f"{now_str}|{receipt_number_text}")
     
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
     await redis.hset(f"user:{user_id}", "tg_username", tg_username)
 
+    # 1. МОМЕНТАЛЬНА ВІДПОВІДЬ КОРИСТУВАЧУ (БЕЗ ПАУЗИ)
+    await message.answer(
+        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші! 🍀", 
+        reply_markup=get_main_reply_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(None)
+
+    # 2. ФОНОВЕ ВІДПРАВЛЕННЯ В GOOGLE ТАБЛИЦЮ
     if GOOGLE_WEBHOOK_URL:
         google_data = {
             "fio": fio,
@@ -407,13 +437,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         except Exception:
             pass
 
-    await message.answer(
-        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші! 🍀", 
-        reply_markup=get_main_reply_kb(),
-        parse_mode="HTML"
-    )
-    await state.set_state(None)
-
+    # 3. ФОНОВЕ ВІДПРАВЛЕННЯ АДМІНУ НА МОДЕРАЦІЮ
     photo_id = message.photo[-1].file_id
     admin_caption = (
         f"🆕 <b>Новий чек прийнято системою!</b> (У клієнта: {new_count})\n\n"
@@ -462,7 +486,18 @@ async def admin_reject(call: CallbackQuery):
     user_id = int(parts[1])
     receipt_number = parts[2]
     
+    # 1. Видаляємо номер з бази дублікатів
     await redis.srem("used_receipts", receipt_number)
+    
+    # 2. Видаляємо запис з історії чеків клієнта
+    history_items = await redis.lrange(f"user_receipts:{user_id}", 0, -1)
+    for item in history_items:
+        decoded_item = item.decode('utf-8')
+        if decoded_item.endswith(f"|{receipt_number}"):
+            await redis.lrem(f"user_receipts:{user_id}", 1, item)
+            break
+            
+    # 3. Мінусуємо лічильник чеків у юзера
     await redis.hincrby(f"user:{user_id}", "receipts", -1)
     
     try:
