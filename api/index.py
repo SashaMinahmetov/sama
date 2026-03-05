@@ -407,7 +407,9 @@ async def admin_approve(call: CallbackQuery):
     fio = user_data.get(b'fio', b'').decode('utf-8')
     phone = user_data.get(b'phone', b'').decode('utf-8')
     ig = user_data.get(b'ig', b'').decode('utf-8')
-    tg_username = user_data.get(b'tg_username', b'Немає').decode('utf-8')
+    
+    # Виправлено помилку з ASCII:
+    tg_username = user_data.get(b'tg_username', b'').decode('utf-8') or "Немає"
     
     if GOOGLE_WEBHOOK_URL:
         google_data = {
@@ -433,7 +435,6 @@ async def admin_approve(call: CallbackQuery):
     except Exception:
         pass
         
-    # Надійне форматування тексту, щоб не злітало HTML (захист від крашу)
     original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
     admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
 
