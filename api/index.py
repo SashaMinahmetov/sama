@@ -23,8 +23,8 @@ GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL")
 ADMIN_ID = "-1003731208847" 
 SUPPORT_TOPIC_ID = 101  # <-- ВПИШИ СЮДА ID ТЕМЫ ДЛЯ ТЕХПОДДЕРЖКИ (например: 45)
 RECEIPTS_TOPIC_ID = 117 # <-- ВПИШИ СЮДА ID ТЕМЫ ДЛЯ ЧЕКОВ (например: 56)
-INSTAGRAM_LINK_1 = "https://www.instagram.com/tm.sama.ua/" 
-INSTAGRAM_LINK_2 = "https://www.instagram.com/koshik_shop_/" 
+INSTAGRAM_LINK_1 = "instagram.com/tm.sama.ua" 
+INSTAGRAM_LINK_2 = "instagram.com/koshik_shop_" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
