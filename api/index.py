@@ -1,6 +1,7 @@
 import os
 import logging
 import aiohttp
+import asyncio
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -32,13 +33,14 @@ storage = RedisStorage(redis=redis)
 dp = Dispatcher(storage=storage)
 app = FastAPI()
 
-# --- СОСТОЯНИЯ ---
+# --- СОСТОЯНИЯ (ВОРОНКА) ---
 class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
-    waiting_for_ig = State() # НОВОЕ: Ждем ник в инсте
-    waiting_for_receipt_number = State() # НОВОЕ: Ждем номер чека
-    waiting_for_receipt_photo = State() # Ждем фото чека
+    waiting_for_receipt_number = State() # Сначала номер чека
+    waiting_for_ig = State()             # Потом ник
+    waiting_for_subscription = State()   # Фейковая проверка подписок
+    waiting_for_receipt_photo = State()  # И только в конце фото
 
 # --- КЛАВІАТУРИ ---
 def get_main_reply_kb():
@@ -95,7 +97,7 @@ async def process_show_cabinet(target_message, user_id: int):
 async def process_start_upload(target_message, user_id: int, state: FSMContext):
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # Если нет инсты в базе (значит регистрация не пройдена)
+    # Если юзер новый
     if not user_data or b'ig' not in user_data:
         await target_message.answer(
             "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
@@ -104,14 +106,13 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
         )
         await state.set_state(Registration.waiting_for_fio)
     else:
-        # Если юзер уже есть в базе, сразу просим номер нового чека
+        # Если юзер старый, сразу просим номер чека
         await target_message.answer(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
             reply_markup=get_cancel_kb(),
             parse_mode="HTML"
         )
         await state.set_state(Registration.waiting_for_receipt_number)
-
 
 # --- ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ---
 @dp.message(Command("start"))
@@ -126,7 +127,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "Оберіть потрібний розділ нижче 👇"
     )
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
-
 
 @dp.message(Command("sendall"))
 async def cmd_sendall(message: types.Message):
@@ -146,7 +146,6 @@ async def cmd_sendall(message: types.Message):
         except Exception as e:
             error_count += 1
     await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Доставлено: {success_count}\n🔴 Помилок: {error_count}", parse_mode="HTML")
-
 
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules(message: types.Message):
@@ -198,12 +197,31 @@ async def process_phone(message: types.Message, state: FSMContext):
     await state.update_data(phone=phone)
     
     await message.answer(
-        "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
-        "<i>Ми перевіримо підписку на наші сторінки під час розіграшу!</i>", 
+        "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
         reply_markup=get_cancel_kb(),
         parse_mode="HTML"
     )
-    await state.set_state(Registration.waiting_for_ig)
+    await state.set_state(Registration.waiting_for_receipt_number)
+
+@dp.message(Registration.waiting_for_receipt_number)
+async def process_receipt_number(message: types.Message, state: FSMContext):
+    await state.update_data(receipt_number=message.text)
+    
+    user_id = message.from_user.id
+    user_data = await redis.hgetall(f"user:{user_id}")
+    
+    # Если юзер уже вводил инсту ранее, сразу отправляем проверку подписки
+    if user_data and b'ig' in user_data:
+        await send_subscription_check(message, state)
+    else:
+        # Иначе просим ввести ник
+        await message.answer(
+            "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
+            "<i>Це потрібно для перевірки виконання умов розіграшу.</i>", 
+            reply_markup=get_cancel_kb(),
+            parse_mode="HTML"
+        )
+        await state.set_state(Registration.waiting_for_ig)
 
 @dp.message(Registration.waiting_for_ig)
 async def process_ig(message: types.Message, state: FSMContext):
@@ -213,28 +231,54 @@ async def process_ig(message: types.Message, state: FSMContext):
     phone = fsm_data.get("phone", "Не вказано")
     user_id = message.from_user.id
     
-    # ЗБЕРІГАЄМО ПРОФІЛЬ В БАЗУ НАЗАВЖДИ
+    # Сохраняем профиль с инстаграмом
     await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "ig": ig, "receipts": 0})
     
+    # Переходим к проверке подписок
+    await send_subscription_check(message, state)
+
+
+# --- ФЕЙКОВАЯ ПРОВЕРКА ПОДПИСОК ---
+async def send_subscription_check(message: types.Message, state: FSMContext):
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="1️⃣ Перевірити та підписатися: Сторінка 1", url=INSTAGRAM_LINK_1)],
+            [InlineKeyboardButton(text="2️⃣ Перевірити та підписатися: Сторінка 2", url=INSTAGRAM_LINK_2)],
+            [InlineKeyboardButton(text="🔄 ПЕРЕВІРИТИ ПІДПИСКИ", callback_data="check_subs")]
+        ]
+    )
     await message.answer(
-        "✅ <b>Реєстрація успішна!</b>\n\n🧾 Тепер <b>введіть НОМЕР вашого чека</b>:", 
-        reply_markup=get_cancel_kb(),
+        "⚠️ <b>Обов'язкова умова участі!</b>\n\n"
+        "Система перевірить наявність вашої підписки на наші офіційні сторінки в Instagram.\n\n"
+        "Перейдіть за посиланнями та натисніть <b>«Перевірити підписки»</b>.",
+        reply_markup=kb,
         parse_mode="HTML"
     )
-    await state.set_state(Registration.waiting_for_receipt_number)
+    await state.set_state(Registration.waiting_for_subscription)
 
-@dp.message(Registration.waiting_for_receipt_number)
-async def process_receipt_number(message: types.Message, state: FSMContext):
-    # Зберігаємо номер чека у тимчасову пам'ять
-    await state.update_data(receipt_number=message.text)
+@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_subs")
+async def process_check_subs(call: CallbackQuery, state: FSMContext):
+    # Этап 1: Меняем сообщение на статус загрузки
+    await call.message.edit_text("⏳ <i>Встановлюється з'єднання з Instagram... Перевірка підписок...</i>", parse_mode="HTML")
     
-    await message.answer(
-        "📸 Тепер відправте <b>ФОТО цього чека</b> для підтвердження:", 
-        reply_markup=get_cancel_kb(),
+    # Этап 2: Выдерживаем паузу в 3 секунды (создаем иллюзию проверки)
+    await asyncio.sleep(3)
+    
+    # Этап 3: Сообщаем об успехе и просим фото
+    await call.message.edit_text(
+        "✅ <b>Підписки успішно підтверджено!</b>\n\n"
+        "📸 Тепер відправте <b>ФОТО вашого чека</b> для завершення реєстрації:", 
         parse_mode="HTML"
     )
     await state.set_state(Registration.waiting_for_receipt_photo)
 
+# Заглушка, если юзер пишет текст вместо нажатия на кнопку "Перевірити"
+@dp.message(Registration.waiting_for_subscription)
+async def force_click_check(message: types.Message):
+    await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 ПЕРЕВІРИТИ ПІДПИСКИ»</b> в повідомленні вище.", parse_mode="HTML")
+
+
+# --- ПРИЕМ ФОТО ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
