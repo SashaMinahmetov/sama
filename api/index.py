@@ -2,6 +2,7 @@ import os
 import logging
 import aiohttp
 import asyncio
+import re
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
@@ -10,7 +11,7 @@ from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
+    ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
 from redis.asyncio import Redis
@@ -20,6 +21,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
+SUPPORT_TOPIC_ID = 101 # <-- ВПИШИ СЮДА ID ТЕМЫ (например: 45). Если None - будет слать в общую группу
 INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
 INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
@@ -43,9 +45,10 @@ class Registration(StatesGroup):
     waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
 
-# --- КЛАВІАТУРИ (МАКСИМАЛЬНО ЧИСТІ) ---
+class Support(StatesGroup):
+    waiting_for_message = State() # Стан для очікування повідомлення в підтримку
 
-# Головне меню
+# --- КЛАВІАТУРИ ---
 def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -58,13 +61,15 @@ def get_inline_start_kb():
                 InlineKeyboardButton(text="🏆 Призи та FAQ", callback_data="show_faq")
             ],
             [
+                InlineKeyboardButton(text="💬 Техпідтримка", callback_data="support_btn")
+            ],
+            [
                 InlineKeyboardButton(text="📸 tm.sama.ua", url=INSTAGRAM_LINK_1),
                 InlineKeyboardButton(text="📸 koshik_shop_", url=INSTAGRAM_LINK_2)
             ]
         ]
     )
 
-# Кнопка повернення в меню
 def get_back_to_main_inline_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -72,15 +77,26 @@ def get_back_to_main_inline_kb():
         ]
     )
 
-# Тільки кнопка Назад (замінила купу кнопок "Скасувати")
-def get_inline_back_kb():
+def get_inline_cancel_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")]]
+    )
+
+def get_inline_back_cancel_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
+            [
+                InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action"),
+                InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")
+            ]
         ]
     )
 
-# СПЕЦІАЛЬНА НИЖНЯ ПАНЕЛЬ (Тільки для запиту номера)
+def get_inline_back_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]]
+    )
+
 def get_phone_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -94,9 +110,7 @@ def get_phone_reply_kb():
 # --- СПІЛЬНА ЛОГІКА ---
 async def show_main_menu(target_message: types.Message, state: FSMContext):
     await state.set_state(None)
-    
-    # Прибираємо нижню клавіатуру, якщо вона десь залишилася
-    rm_msg = await target_message.answer("🔄 Завантаження...", reply_markup=ReplyKeyboardRemove())
+    rm_msg = await target_message.answer("🔄 Оновлення...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
     welcome_text = (
@@ -109,12 +123,8 @@ async def show_main_menu(target_message: types.Message, state: FSMContext):
 
 async def process_show_cabinet(target_message, user_id: int):
     user_data = await redis.hgetall(f"user:{user_id}")
-    
     if not user_data:
-        await target_message.answer(
-            "🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Завантажити чек», щоб створити профіль та додати перший чек!", 
-            reply_markup=get_back_to_main_inline_kb()
-        )
+        await target_message.answer("🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Завантажити чек».", reply_markup=get_back_to_main_inline_kb())
         return
 
     fio = user_data.get(b'fio', b'').decode('utf-8')
@@ -130,69 +140,36 @@ async def process_show_cabinet(target_message, user_id: int):
             try:
                 date_str, rec_num = item.decode('utf-8').split('|', 1)
                 history_text += f"🔹 {date_str} — № {rec_num}\n"
-            except:
-                pass
+            except: pass
     else:
         history_text = "\n\n📋 <b>Історія ваших чеків:</b>\nПоки що порожньо."
 
     cabinet_text = (
         "👤 <b>Ваш особистий кабінет:</b>\n\n"
-        f"🔸 <b>ПІБ:</b> {fio}\n"
-        f"🔸 <b>Телефон:</b> {phone}\n"
-        f"🔸 <b>Instagram:</b> {ig}\n"
-        f"🎫 <b>Успішно схвалено чеків:</b> {receipts_count}"
-        f"{history_text}\n\n"
+        f"🔸 <b>ПІБ:</b> {fio}\n🔸 <b>Телефон:</b> {phone}\n🔸 <b>Instagram:</b> {ig}\n"
+        f"🎫 <b>Успішно схвалено чеків:</b> {receipts_count}{history_text}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
     await target_message.answer(cabinet_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 async def process_start_upload(target_message, user_id: int, state: FSMContext):
     user_data = await redis.hgetall(f"user:{user_id}")
-    
     if not user_data or b'ig' not in user_data:
-        await target_message.answer(
-            "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
-            reply_markup=get_inline_back_kb(),
-            parse_mode="HTML"
-        )
+        await target_message.answer("📝 Для початку реєстрації напишіть ваше <b>ПІБ</b>:", reply_markup=get_inline_cancel_kb(), parse_mode="HTML")
         await state.set_state(Registration.waiting_for_fio)
     else:
-        await target_message.answer(
-            "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-            reply_markup=get_inline_back_kb(),
-            parse_mode="HTML"
-        )
+        await target_message.answer("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_cancel_kb(), parse_mode="HTML")
         await state.set_state(Registration.waiting_for_receipt_number)
 
 async def process_show_rules(target_message):
-    rules = (
-        "📜 <b>Умови дуже прості:</b>\n\n"
-        "1️⃣ Бути підписаним на наші 2 сторінки в Instagram.\n"
-        "2️⃣ Купувати нашу акційну продукцію.\n"
-        "3️⃣ Натискати «Завантажити чек» у цьому боті.\n"
-        "4️⃣ Вводити номер чека та надсилати його фото.\n\n"
-        "Більше чеків — більше шансів на перемогу! 🍀"
-    )
+    rules = "📜 <b>Умови дуже прості:</b>\n\n1️⃣ Підписка на 2 сторінки.\n2️⃣ Купівля акційної продукції.\n3️⃣ Завантаження чека.\n\nБільше чеків — більше шансів!"
     await target_message.answer(rules, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 async def process_show_faq(target_message):
-    faq_text = (
-        "🏆 <b>Призовий фонд та Часті запитання:</b>\n\n"
-        "🎁 <b>Що можна виграти?</b>\n"
-        "• Головний приз: <b>[Напиши тут головний приз]</b>\n"
-        "• Щотижневі призи: <b>[Напиши тут інші призи]</b>\n\n"
-        "📅 <b>Коли відбудеться розіграш?</b>\n"
-        "Розіграш відбудеться <b>[Вкажи дату]</b> у прямому ефірі на нашій сторінці в Instagram.\n\n"
-        "❓ <b>Скільки чеків можна завантажити?</b>\n"
-        "Необмежену кількість! Більше унікальних чеків — більше шансів на перемогу.\n\n"
-        "❓ <b>Чи потрібно зберігати паперовий чек?</b>\n"
-        "Так, <b>ОБОВ'ЯЗКОВО</b> зберігайте оригінал чека до кінця розіграшу. Без нього отримати приз буде неможливо!"
-    )
+    faq_text = "🏆 <b>Призи:</b>\n• Головний приз...\n\n❓ Зберігати чек ОБОВ'ЯЗКОВО."
     await target_message.answer(faq_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
-
 # --- ОБРОБНИКИ КОМАНД ---
-
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
     await show_main_menu(message, state)
@@ -201,42 +178,74 @@ async def cmd_start(message: types.Message, state: FSMContext):
 async def cmd_cleardb(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
     await redis.flushdb()
-    await message.answer("🧹 <b>База даних ПОВНІСТЮ ОЧИЩЕНА!</b>\n\nВсі користувачі, їхні профілі та використані номери чеків видалені. Бот готовий до реального запуску.", parse_mode="HTML")
+    await message.answer("🧹 База очищена.")
 
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
-    users_keys = await redis.keys("user:*")
-    users_count = len(users_keys)
-    unique_receipts = await redis.scard("used_receipts") 
-    stats_text = (
-        "📊 <b>Статистика розіграшу:</b>\n\n"
-        f"👤 Усього учасників: <b>{users_count}</b>\n"
-        f"🧾 Чеків у базі: <b>{unique_receipts}</b>"
-    )
-    await message.answer(stats_text, parse_mode="HTML")
+    users = len(await redis.keys("user:*"))
+    receipts = await redis.scard("used_receipts") 
+    await message.answer(f"📊 <b>Статистика:</b>\nУчасників: {users}\nЧеків: {receipts}", parse_mode="HTML")
 
 @dp.message(Command("sendall"))
 async def cmd_sendall(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
-    text_to_send = message.text.replace("/sendall", "").strip()
-    if not text_to_send:
-        await message.answer("⚠️ Ви не ввели текст. Використання: `/sendall Ваш текст`", parse_mode="Markdown")
+    text = message.text.replace("/sendall", "").strip()
+    if not text:
+        await message.answer("⚠️ Введіть текст.")
         return
-    await message.answer("⏳ Розпочинаю розсилку...")
-    keys = await redis.keys("user:*")
-    success_count, error_count = 0, 0
+    await message.answer("⏳ Розсилка...")
+    keys, success, error = await redis.keys("user:*"), 0, 0
     for key in keys:
-        user_id_str = key.decode('utf-8').split(":")[1]
         try:
-            await bot.send_message(chat_id=int(user_id_str), text=text_to_send, parse_mode="HTML")
-            success_count += 1
-        except Exception:
-            error_count += 1
-    await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Доставлено: {success_count}\n🔴 Помилок: {error_count}", parse_mode="HTML")
+            await bot.send_message(chat_id=int(key.decode('utf-8').split(":")[1]), text=text, parse_mode="HTML")
+            success += 1
+        except: error += 1
+    await message.answer(f"✅ Доставлено: {success}\n🔴 Помилок: {error}")
 
 
-# --- ОБРОБНИКИ INLINE-НАВІГАЦІЇ (КНОПКИ В ЧАТІ) ---
+# --- ЗВОРОТНИЙ ЗВ'ЯЗОК (АДМІН ВІДПОВІДАЄ КОРИСТУВАЧУ) ---
+@dp.message(F.chat.id == int(ADMIN_ID), F.reply_to_message)
+async def admin_reply_to_support(message: types.Message):
+    # Перевіряємо, чи це відповідь на повідомлення від самого бота
+    orig = message.reply_to_message
+    if orig.from_user.id != bot.id: return
+        
+    text_to_search = orig.text or orig.caption or ""
+    # Шукаємо ID: 12345678 в тексті
+    match = re.search(r"ID:\s*(\d+)", text_to_search)
+    
+    if match:
+        target_user_id = int(match.group(1))
+        try:
+            # Копіюємо відповідь адміна (текст, фото, відео) клієнту
+            await message.copy_to(target_user_id)
+            # Відправляємо адміну підтвердження (можна видалити, якщо дратує)
+            reply_msg = await message.reply("✅ Відповідь доставлено!")
+            await asyncio.sleep(3)
+            await reply_msg.delete()
+        except Exception as e:
+            await message.reply(f"⚠️ Помилка відправки. Можливо, клієнт заблокував бота. ({e})")
+
+
+# --- ОБРОБНИКИ НАВІГАЦІЇ (INLINE) ---
+@dp.callback_query(F.data == "support_btn")
+async def support_btn_call(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await call.message.edit_text(
+        "💬 <b>Служба підтримки</b>\n\n"
+        "Опишіть вашу проблему або запитання в одному повідомленні (можна додати фото).\n"
+        "Наш менеджер відповість вам прямо в цьому боті найближчим часом:",
+        reply_markup=get_inline_back_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(Support.waiting_for_message)
+
+@dp.callback_query(F.data == "cancel_action")
+async def cancel_action_call(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await call.message.delete()
+    await show_main_menu(call.message, state)
 
 @dp.callback_query(F.data == "back_action")
 async def back_action_call(call: CallbackQuery, state: FSMContext):
@@ -245,45 +254,27 @@ async def back_action_call(call: CallbackQuery, state: FSMContext):
     
     if current_state == Registration.waiting_for_receipt_photo.state:
         await state.set_state(Registration.waiting_for_receipt_number)
-        await call.message.edit_text(
-            "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-            reply_markup=get_inline_back_kb(), parse_mode="HTML"
-        )
+        await call.message.edit_text("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML")
     elif current_state == Registration.waiting_for_ig.state:
         await state.set_state(Registration.waiting_for_receipt_number)
-        await call.message.edit_text(
-            "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-            reply_markup=get_inline_back_kb(), parse_mode="HTML"
-        )
+        await call.message.edit_text("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML")
     elif current_state == Registration.waiting_for_subscription.state:
         await state.set_state(Registration.waiting_for_ig)
-        await call.message.edit_text(
-            "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
-            "<i>Це потрібно для перевірки виконання умов розіграшу.</i>", 
-            reply_markup=get_inline_back_kb(), parse_mode="HTML"
-        )
+        await call.message.edit_text("📸 <b>Введіть ваш нікнейм в Instagram:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
     elif current_state == Registration.waiting_for_receipt_number.state:
         user_data = await redis.hgetall(f"user:{call.from_user.id}")
         if not user_data or b'ig' not in user_data:
             await state.set_state(Registration.waiting_for_phone)
             await call.message.delete()
-            # Повертаємо тимчасову нижню клавіатуру для телефону
-            await call.message.answer(
-                "📱 Натисніть кнопку <b>«📱 Поділитися номером»</b> внизу екрана або введіть його вручну:", 
-                reply_markup=get_phone_reply_kb(), parse_mode="HTML"
-            )
+            await call.message.answer("📱 Натисніть кнопку <b>«📱 Поділитися номером»</b> внизу екрана:", reply_markup=get_phone_reply_kb(), parse_mode="HTML")
         else:
             await call.message.delete()
             await show_main_menu(call.message, state)
     elif current_state == Registration.waiting_for_phone.state:
         await state.set_state(Registration.waiting_for_fio)
-        # Прибираємо нижню клавіатуру телефону
         rm_msg = await call.message.answer("🔄...", reply_markup=ReplyKeyboardRemove())
         await rm_msg.delete()
-        await call.message.answer(
-            "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
-            reply_markup=get_inline_back_kb(), parse_mode="HTML"
-        )
+        await call.message.answer("📝 Введіть ваше <b>ПІБ</b>:", reply_markup=get_inline_cancel_kb(), parse_mode="HTML")
     else:
         await call.message.delete()
         await show_main_menu(call.message, state)
@@ -315,76 +306,80 @@ async def start_upload_call(call: CallbackQuery, state: FSMContext):
     await process_start_upload(call.message, call.from_user.id, state)
 
 
-# --- ВОРОНКА РЕЄСТРАЦІЇ ---
+# --- ВОРОНКА ТЕХПІДТРИМКИ ---
+@dp.message(Support.waiting_for_message)
+async def process_support_msg(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user_data = await redis.hgetall(f"user:{user_id}")
+    fio = user_data.get(b'fio', b'Не вказано').decode('utf-8') if user_data else "Гість"
+    username = f"@{message.from_user.username}" if message.from_user.username else "Без юзернейму"
+    
+    header = f"🆘 <b>ЗАПИТ У ПІДТРИМКУ</b>\n👤 <b>Від:</b> {fio} ({username})\n🆔 <b>ID:</b> {user_id}\n\n"
+    
+    kwargs = {"chat_id": ADMIN_ID, "parse_mode": "HTML"}
+    if SUPPORT_TOPIC_ID:
+        kwargs["message_thread_id"] = int(SUPPORT_TOPIC_ID)
+        
+    try:
+        if message.text:
+            await bot.send_message(text=header + message.html_text, **kwargs)
+        elif message.photo:
+            caption = header + (message.html_text or "")
+            await bot.send_photo(photo=message.photo[-1].file_id, caption=caption, **kwargs)
+        else:
+            await message.answer("⚠️ Будь ласка, надішліть текст або фотографію.", reply_markup=get_inline_back_kb())
+            return
+            
+        await message.answer("✅ <b>Ваш запит успішно надіслано!</b>\nОчікуйте на відповідь.", reply_markup=get_back_to_main_inline_kb(), parse_mode="HTML")
+        await state.set_state(None)
+    except Exception as e:
+        logging.error(f"Support Error: {e}")
+        await message.answer(f"⚠️ Виникла технічна помилка.", reply_markup=get_inline_back_kb())
 
+
+# --- ВОРОНКА РЕЄСТРАЦІЇ ---
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Будь ласка, введіть ПІБ текстом:", reply_markup=get_inline_back_kb())
+        await message.answer("⚠️ Введіть ПІБ текстом:", reply_markup=get_inline_back_kb())
         return
     await state.update_data(fio=message.text)
-    
-    # Викликаємо тимчасову нижню клавіатуру для телефону
-    await message.answer(
-        "Чудово! Натисніть кнопку <b>«📱 Поділитися номером»</b> внизу екрана або напишіть його вручну:", 
-        reply_markup=get_phone_reply_kb(),
-        parse_mode="HTML"
-    )
+    await message.answer("Чудово! Натисніть кнопку <b>«📱 Поділитися номером»</b> внизу екрана:", reply_markup=get_phone_reply_kb(), parse_mode="HTML")
     await state.set_state(Registration.waiting_for_phone)
 
 @dp.message(Registration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    # Обробка натискання кнопки "Назад" на нижній клавіатурі
     if message.text == "⬅️ Назад":
         rm_msg = await message.answer("🔄 Повертаємось...", reply_markup=ReplyKeyboardRemove())
         await rm_msg.delete()
-        await message.answer(
-            "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
-            reply_markup=get_inline_back_kb(), parse_mode="HTML"
-        )
+        await message.answer("📝 Введіть ваше <b>ПІБ</b>:", reply_markup=get_inline_cancel_kb(), parse_mode="HTML")
         await state.set_state(Registration.waiting_for_fio)
         return
 
-    # Отримуємо номер з контакту АБО тексту
-    phone = ""
-    if message.contact:
-        phone = message.contact.phone_number
-    elif message.text:
-        phone = message.text
-    else:
-        await message.answer("⚠️ Будь ласка, надішліть контакт або введіть номер текстом:", reply_markup=get_phone_reply_kb())
+    phone = message.contact.phone_number if message.contact else message.text
+    if not phone:
+        await message.answer("⚠️ Надішліть контакт або введіть номер текстом:", reply_markup=get_phone_reply_kb())
         return
 
     await state.update_data(phone=phone)
-    
-    # ХОВАЄМО НИЖНЮ ПАНЕЛЬ НАЗАВЖДИ
     rm_msg = await message.answer("🔄 Зберігаємо...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
-    await message.answer(
-        "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-        reply_markup=get_inline_back_kb(),
-        parse_mode="HTML"
-    )
+    await message.answer("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML")
     await state.set_state(Registration.waiting_for_receipt_number)
 
 @dp.message(Registration.waiting_for_receipt_number)
 async def process_receipt_number(message: types.Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Будь ласка, введіть номер чека текстом:", reply_markup=get_inline_back_kb())
+        await message.answer("⚠️ Введіть номер чека текстом:", reply_markup=get_inline_back_kb())
         return
     receipt_num = message.text.strip().upper() 
-    
     if len(receipt_num) > 30:
-        await message.answer("⚠️ Номер чека занадто довгий. Перевірте та введіть коректний номер:", reply_markup=get_inline_back_kb())
+        await message.answer("⚠️ Номер занадто довгий.", reply_markup=get_inline_back_kb())
         return
 
-    is_used = await redis.sismember("used_receipts", receipt_num)
-    if is_used:
-        await message.answer(
-            "⚠️ <b>Помилка!</b> Чек з таким номером вже був зареєстрований у системі.\nСпробуйте ввести інший номер:",
-            parse_mode="HTML", reply_markup=get_inline_back_kb()
-        )
+    if await redis.sismember("used_receipts", receipt_num):
+        await message.answer("⚠️ Чек з таким номером вже є в системі.", reply_markup=get_inline_back_cancel_kb())
         return 
         
     await state.update_data(receipt_number=receipt_num)
@@ -395,230 +390,20 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
     
     if user_data and b'ig' in user_data:
         if is_sub_checked:
-            await message.answer(
-                "📸 Тепер відправте <b>ФОТО вашого чека</b>:", 
-                reply_markup=get_inline_back_kb(), parse_mode="HTML"
-            )
+            await message.answer("📸 Тепер відправте <b>ФОТО вашого чека</b>:", reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML")
             await state.set_state(Registration.waiting_for_receipt_photo)
         else:
             await send_subscription_step_1(message, state)
     else:
-        await message.answer(
-            "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
-            "<i>Це потрібно для перевірки виконання умов розіграшу.</i>", 
-            reply_markup=get_inline_back_kb(), parse_mode="HTML"
-        )
+        await message.answer("📸 <b>Введіть ваш нікнейм в Instagram:</b>", reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML")
         await state.set_state(Registration.waiting_for_ig)
 
 @dp.message(Registration.waiting_for_ig)
 async def process_ig(message: types.Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Будь ласка, введіть нікнейм текстом:", reply_markup=get_inline_back_kb())
+        await message.answer("⚠️ Введіть нікнейм текстом:", reply_markup=get_inline_back_kb())
         return
-    ig = message.text
-    fsm_data = await state.get_data()
-    fio = fsm_data.get("fio", "Не вказано")
-    phone = fsm_data.get("phone", "Не вказано")
-    user_id = message.from_user.id
-    
-    await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "ig": ig, "receipts": 0, "sub_checked": "0"})
-    await send_subscription_step_1(message, state)
-
-async def send_subscription_step_1(message: types.Message, state: FSMContext):
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
-            [InlineKeyboardButton(text="🔄 Перевірити підписку 1", callback_data="check_sub_1")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
-        ]
-    )
-    text = (
-        "⚠️ <b>Обов'язкова умова участі! (Крок 1 з 2)</b>\n\n"
-        "Система перевірить наявність підписки на нашу першу сторінку.\n"
-        "Перейдіть за посиланням, підпишіться, поверніться сюди та натисніть <b>«Перевірити підписку 1»</b>."
-    )
-    await message.answer(text, reply_markup=kb, parse_mode="HTML")
-    await state.set_state(Registration.waiting_for_subscription)
-
-@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_1")
-async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка першої підписки...</i>", parse_mode="HTML")
-    await asyncio.sleep(2.5) 
-    
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
-            [InlineKeyboardButton(text="🔄 Перевірити підписку 2", callback_data="check_sub_2")],
-            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
-        ]
-    )
-    text = (
-        "✅ <b>Першу підписку підтверджено!</b>\n\n"
-        "⚠️ <b>Крок 2 з 2:</b> Тепер підпишіться на нашу другу сторінку. "
-        "Після підписки натисніть кнопку перевірки нижче."
-    )
-    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
-
-@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_2")
-async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка другої підписки...</i>", parse_mode="HTML")
-    await asyncio.sleep(2.5) 
-    
-    await redis.hset(f"user:{call.from_user.id}", "sub_checked", "1")
-    
-    await call.message.edit_text("✅ <b>Всі підписки успішно підтверджено!</b> 🎉", parse_mode="HTML")
-    await call.message.answer(
-        "📸 Тепер відправте <b>ФОТО вашого чека</b> для реєстрації:", 
-        reply_markup=get_inline_back_kb(), parse_mode="HTML"
-    )
-    await state.set_state(Registration.waiting_for_receipt_photo)
-
-@dp.message(Registration.waiting_for_subscription)
-async def force_click_check(message: types.Message):
-    await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
-
-# --- ПРИЙОМ ФОТО ---
-@dp.message(Registration.waiting_for_receipt_photo, F.photo)
-async def process_receipt_photo(message: types.Message, state: FSMContext):
-    user_id = message.from_user.id
-    
-    user_data = await redis.hgetall(f"user:{user_id}")
-    fio = user_data.get(b'fio', b'').decode('utf-8')
-    phone = user_data.get(b'phone', b'').decode('utf-8')
-    ig = user_data.get(b'ig', b'').decode('utf-8')
-    tg_username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
     
     fsm_data = await state.get_data()
-    receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
-    
-    if receipt_number_text != "Не вказано":
-        await redis.sadd("used_receipts", receipt_number_text)
-        kyiv_time = datetime.utcnow() + timedelta(hours=2)
-        now_str = kyiv_time.strftime("%d.%m.%Y %H:%M")
-        await redis.rpush(f"user_receipts:{user_id}", f"{now_str}|{receipt_number_text}")
-    
-    await redis.hincrby(f"user:{user_id}", "receipts", 1)
-    new_count = await redis.hget(f"user:{user_id}", "receipts")
-    new_count = new_count.decode('utf-8')
-    await redis.hset(f"user:{user_id}", "tg_username", tg_username)
-    
-    await message.answer(
-        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші! 🍀\n\n"
-        "<i>Натисніть кнопку нижче, щоб повернутися в головне меню.</i>", 
-        reply_markup=get_back_to_main_inline_kb(),
-        parse_mode="HTML"
-    )
-    await state.set_state(None)
-
-    if GOOGLE_WEBHOOK_URL:
-        google_data = {
-            "fio": fio,
-            "phone": phone,
-            "tg_username": tg_username,
-            "ig_username": ig,
-            "receipt_count": new_count,
-            "receipt_number": receipt_number_text
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                await session.post(GOOGLE_WEBHOOK_URL, json=google_data)
-        except Exception:
-            pass
-
-    photo_id = message.photo[-1].file_id
-    admin_caption = (
-        f"🆕 <b>Новий чек прийнято системою!</b> (У клієнта: {new_count})\n\n"
-        f"🧾 <b>Номер чека:</b> {receipt_number_text}\n"
-        f"👤 <b>ПІБ:</b> {fio}\n"
-        f"📱 <b>Телефон:</b> {phone}\n"
-        f"📸 <b>Instagram:</b> {ig}\n"
-        f"💬 <b>TG Юзернейм:</b> {tg_username}"
-    )
-    
-    admin_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Ок (Сховати)", callback_data=f"approve_hide"),
-                InlineKeyboardButton(text="❌ ВІДХИЛИТИ (Брак)", callback_data=f"reject_{user_id}_{receipt_number_text}")
-            ]
-        ]
-    )
-    
-    try:
-        await bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=admin_caption, reply_markup=admin_kb, parse_mode="HTML")
-    except Exception as e:
-        logging.error(f"Помилка відправки в групу: {e}")
-
-@dp.message(Registration.waiting_for_receipt_photo)
-async def error_receipt_format(message: types.Message):
-    await message.answer("⚠️ Будь ласка, відправте саме <b>ФОТО</b> чека 📸 (документи або текст не приймаються).", parse_mode="HTML", reply_markup=get_inline_back_kb())
-
-# --- ОБРОБНИКИ КНОПОК МОДЕРАЦІЇ ---
-
-@dp.callback_query(F.data == "approve_hide")
-async def admin_approve(call: CallbackQuery):
-    original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
-    admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
-
-    await call.message.edit_caption(
-        caption=original_caption + f"\n\n✅ <b>Перевірено:</b> {admin_name}", 
-        parse_mode="HTML", 
-        reply_markup=None
-    )
-    await call.answer("Ок!")
-
-@dp.callback_query(F.data.startswith("reject_"))
-async def admin_reject(call: CallbackQuery):
-    parts = call.data.split("_")
-    user_id = int(parts[1])
-    receipt_number = parts[2]
-    
-    await redis.srem("used_receipts", receipt_number)
-    
-    history_items = await redis.lrange(f"user_receipts:{user_id}", 0, -1)
-    for item in history_items:
-        decoded_item = item.decode('utf-8')
-        if decoded_item.endswith(f"|{receipt_number}"):
-            await redis.lrem(f"user_receipts:{user_id}", 1, item)
-            break
-            
-    await redis.hincrby(f"user:{user_id}", "receipts", -1)
-    
-    try:
-        await bot.send_message(
-            chat_id=user_id, 
-            text=f"⚠️ <b>Увага!</b> Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.\nМожливо, фото нечітке, обрізане або чек не відповідає умовам.\n\nБудь ласка, завантажте цей чек правильно ще раз.", 
-            parse_mode="HTML",
-            reply_markup=get_back_to_main_inline_kb()
-        )
-    except Exception:
-        pass
-        
-    original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
-    admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
-
-    await call.message.edit_caption(
-        caption=original_caption + f"\n\n❌ <b>ВІДХИЛЕНО:</b> {admin_name}", 
-        parse_mode="HTML", 
-        reply_markup=None
-    )
-    await call.answer("Чек відхилено!")
-
-
-# --- WEBHOOK ---
-@app.get("/")
-async def health_check():
-    return {"status": "ok", "message": "Бот працює!"}
-
-@app.post("/api/webhook")
-async def telegram_webhook(request: Request):
-    try:
-        data = await request.json()
-        update = types.Update(**data)
-        await dp.feed_update(bot, update)
-        return {"status": "ok"}
-    except Exception as e:
-        logging.error(f"Error: {e}")
-        return {"status": "error", "message": str(e)}
+    user_id = message.from_user.id
+    await redis.hset(f"user
