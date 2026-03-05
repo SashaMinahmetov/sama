@@ -44,6 +44,8 @@ class Registration(StatesGroup):
     waiting_for_receipt_photo = State()  
 
 # --- КЛАВІАТУРИ ---
+
+# Запасна нижня панель
 def get_main_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -53,6 +55,7 @@ def get_main_reply_kb():
         resize_keyboard=True
     )
 
+# ГОЛОВНІ ЕКРАННІ КНОПКИ (ПІД ТЕКСТОМ)
 def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -67,13 +70,14 @@ def get_inline_start_kb():
         ]
     )
 
-def get_cancel_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Скасувати")]],
-        resize_keyboard=True
+# ЕКРАННА КНОПКА ПОВЕРНЕННЯ В МЕНЮ (ДЛЯ ЗРУЧНОСТІ)
+def get_back_to_main_inline_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🏠 В головне меню", callback_data="back_to_main")]
+        ]
     )
 
-# НОВА КЛАВІАТУРА З КНОПКОЮ "НАЗАД"
 def get_back_cancel_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -89,7 +93,7 @@ async def process_show_cabinet(target_message, user_id: int):
     if not user_data:
         await target_message.answer(
             "🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Завантажити чек», щоб створити профіль та додати перший чек!", 
-            reply_markup=get_main_reply_kb()
+            reply_markup=get_back_to_main_inline_kb()
         )
         return
 
@@ -120,7 +124,8 @@ async def process_show_cabinet(target_message, user_id: int):
         f"{history_text}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
-    await target_message.answer(cabinet_text, parse_mode="HTML")
+    # ДОДАЄМО ЕКРАННУ КНОПКУ ПОВЕРНЕННЯ НАЗАД
+    await target_message.answer(cabinet_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 async def process_start_upload(target_message, user_id: int, state: FSMContext):
     user_data = await redis.hgetall(f"user:{user_id}")
@@ -135,7 +140,7 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
     else:
         await target_message.answer(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-            reply_markup=get_back_cancel_kb(), # Змінено на клавіатуру з Назад
+            reply_markup=get_back_cancel_kb(),
             parse_mode="HTML"
         )
         await state.set_state(Registration.waiting_for_receipt_number)
@@ -149,7 +154,8 @@ async def process_show_rules(target_message):
         "4️⃣ Вводити номер чека та надсилати його фото.\n\n"
         "Більше чеків — більше шансів на перемогу! 🍀"
     )
-    await target_message.answer(rules, parse_mode="HTML")
+    # ДОДАЄМО ЕКРАННУ КНОПКУ ПОВЕРНЕННЯ НАЗАД
+    await target_message.answer(rules, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 async def process_show_faq(target_message):
     faq_text = (
@@ -164,7 +170,8 @@ async def process_show_faq(target_message):
         "❓ <b>Чи потрібно зберігати паперовий чек?</b>\n"
         "Так, <b>ОБОВ'ЯЗКОВО</b> зберігайте оригінал чека до кінця розіграшу. Без нього отримати приз буде неможливо!"
     )
-    await target_message.answer(faq_text, parse_mode="HTML")
+    # ДОДАЄМО ЕКРАННУ КНОПКУ ПОВЕРНЕННЯ НАЗАД
+    await target_message.answer(faq_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 # --- ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ---
 @dp.message(Command("start"))
@@ -178,6 +185,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         "⚠️ <b>Обов'язкова умова:</b> підписка на наші дві Instagram сторінки!\n\n"
         "Оберіть потрібний розділ нижче 👇"
     )
+    # ОСЬ ТУТ ВСТАВЛЯЮТЬСЯ ЕКРАННІ КНОПКИ ПІД ТЕКСТОМ
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
 @dp.message(Command("cleardb"))
@@ -220,13 +228,12 @@ async def cmd_sendall(message: types.Message):
             error_count += 1
     await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Доставлено: {success_count}\n🔴 Помилок: {error_count}", parse_mode="HTML")
 
-# ОБРОБНИК КНОПКИ "НАЗАД"
+# ОБРОБНИК КНОПКИ "НАЗАД" (ДЛЯ ВОРОНКИ)
 @dp.message(F.text == "⬅️ Назад")
 async def process_back_button(message: types.Message, state: FSMContext):
     current_state = await state.get_state()
     
     if current_state == Registration.waiting_for_receipt_photo.state:
-        # Відкат з фото на ввід номера чека
         await message.answer(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
             reply_markup=get_back_cancel_kb(),
@@ -235,7 +242,6 @@ async def process_back_button(message: types.Message, state: FSMContext):
         await state.set_state(Registration.waiting_for_receipt_number)
         
     elif current_state == Registration.waiting_for_ig.state:
-        # Відкат з Інстаграму на номер чека
         await message.answer(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
             reply_markup=get_back_cancel_kb(),
@@ -244,10 +250,9 @@ async def process_back_button(message: types.Message, state: FSMContext):
         await state.set_state(Registration.waiting_for_receipt_number)
         
     else:
-        # У всіх інших випадках назад працює як скасування (на головну)
         await cmd_start(message, state)
 
-# ПОВЕРНЕННЯ В МЕНЮ ЧЕРЕЗ INLINE КНОПКУ
+# ПОВЕРНЕННЯ В МЕНЮ ЧЕРЕЗ ЕКРАННУ (INLINE) КНОПКУ
 @dp.callback_query(F.data == "back_to_main")
 async def back_to_main_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
@@ -419,7 +424,6 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
         "✅ <b>Всі підписки успішно підтверджено!</b> 🎉", 
         parse_mode="HTML"
     )
-    # Змінюємо повідомлення на запит фото + клавіатура з кнопкою Назад
     await call.message.answer(
         "📸 Тепер відправте <b>ФОТО вашого чека</b> для реєстрації:", 
         reply_markup=get_back_cancel_kb(),
@@ -430,7 +434,6 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
 @dp.message(Registration.waiting_for_subscription)
 async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
-
 
 # --- ПРИЙОМ ФОТО: МОМЕНТАЛЬНЕ ПОВІДОМЛЕННЯ + ЗАПИС ІСТОРІЇ ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
@@ -446,7 +449,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
-    # Записуємо номер в базу (щоб уникнути дублікатів) і зберігаємо історію
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
         kyiv_time = datetime.utcnow() + timedelta(hours=2)
@@ -458,26 +460,18 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     new_count = new_count.decode('utf-8')
     await redis.hset(f"user:{user_id}", "tg_username", tg_username)
 
-    # 1. МОМЕНТАЛЬНА ВІДПОВІДЬ З КНОПКОЮ МЕНЮ
-    success_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🏠 В головне меню", callback_data="back_to_main")]
-        ]
-    )
-    
-    # Видаляємо нижню клавіатуру "Назад/Скасувати", щоб було красиво
+    # Прибираємо нижню клавіатуру, щоб не заважала
     rm_msg = await message.answer("🔄 Обробка...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
     await message.answer(
         f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші! 🍀\n\n"
         "<i>Натисніть кнопку нижче, щоб повернутися в головне меню.</i>", 
-        reply_markup=success_kb,
+        reply_markup=get_back_to_main_inline_kb(),
         parse_mode="HTML"
     )
     await state.set_state(None)
 
-    # 2. ФОНОВЕ ВІДПРАВЛЕННЯ В GOOGLE ТАБЛИЦЮ
     if GOOGLE_WEBHOOK_URL:
         google_data = {
             "fio": fio,
@@ -493,7 +487,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         except Exception:
             pass
 
-    # 3. ФОНОВЕ ВІДПРАВЛЕННЯ АДМІНУ НА МОДЕРАЦІЮ
     photo_id = message.photo[-1].file_id
     admin_caption = (
         f"🆕 <b>Новий чек прийнято системою!</b> (У клієнта: {new_count})\n\n"
@@ -542,10 +535,8 @@ async def admin_reject(call: CallbackQuery):
     user_id = int(parts[1])
     receipt_number = parts[2]
     
-    # 1. Видаляємо номер з бази дублікатів
     await redis.srem("used_receipts", receipt_number)
     
-    # 2. Видаляємо запис з історії чеків клієнта
     history_items = await redis.lrange(f"user_receipts:{user_id}", 0, -1)
     for item in history_items:
         decoded_item = item.decode('utf-8')
@@ -553,14 +544,14 @@ async def admin_reject(call: CallbackQuery):
             await redis.lrem(f"user_receipts:{user_id}", 1, item)
             break
             
-    # 3. Мінусуємо лічильник чеків у юзера
     await redis.hincrby(f"user:{user_id}", "receipts", -1)
     
     try:
         await bot.send_message(
             chat_id=user_id, 
             text=f"⚠️ <b>Увага!</b> Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.\nМожливо, фото нечітке, обрізане або чек не відповідає умовам.\n\nБудь ласка, завантажте цей чек правильно ще раз через меню «🧾 Завантажити чек».", 
-            parse_mode="HTML"
+            parse_mode="HTML",
+            reply_markup=get_back_to_main_inline_kb()
         )
     except Exception:
         pass
