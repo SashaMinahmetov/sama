@@ -19,8 +19,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
-INSTAGRAM_LINK_1 = "https://instagram.com/vasia_pupkin" # Замени на 1 страницу
-INSTAGRAM_LINK_2 = "https://instagram.com/vasia_pupkin2" # Замени на 2 страницу
+INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
+INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
@@ -33,14 +33,14 @@ storage = RedisStorage(redis=redis)
 dp = Dispatcher(storage=storage)
 app = FastAPI()
 
-# --- СОСТОЯНИЯ (ВОРОНКА) ---
+# --- СОСТОЯНИЯ ---
 class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
-    waiting_for_receipt_number = State() # Сначала номер чека
-    waiting_for_ig = State()             # Потом ник
-    waiting_for_subscription = State()   # Фейковая проверка подписок
-    waiting_for_receipt_photo = State()  # И только в конце фото
+    waiting_for_receipt_number = State() 
+    waiting_for_ig = State()             
+    waiting_for_subscription = State()   # Стан для поетапної перевірки
+    waiting_for_receipt_photo = State()  
 
 # --- КЛАВІАТУРИ ---
 def get_main_reply_kb():
@@ -56,9 +56,7 @@ def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt")],
-            [InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")],
-            [InlineKeyboardButton(text="📸 Наш Instagram 1", url=INSTAGRAM_LINK_1)],
-            [InlineKeyboardButton(text="📸 Наш Instagram 2", url=INSTAGRAM_LINK_2)]
+            [InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")]
         ]
     )
 
@@ -97,7 +95,7 @@ async def process_show_cabinet(target_message, user_id: int):
 async def process_start_upload(target_message, user_id: int, state: FSMContext):
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # Если юзер новый
+    # Якщо новий користувач
     if not user_data or b'ig' not in user_data:
         await target_message.answer(
             "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
@@ -106,7 +104,7 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
         )
         await state.set_state(Registration.waiting_for_fio)
     else:
-        # Если юзер старый, сразу просим номер чека
+        # Якщо вже є в базі
         await target_message.answer(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
             reply_markup=get_cancel_kb(),
@@ -210,11 +208,10 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # Если юзер уже вводил инсту ранее, сразу отправляем проверку подписки
+    # Якщо інстаграм вже є, одразу йдемо на Етап 1 перевірки
     if user_data and b'ig' in user_data:
-        await send_subscription_check(message, state)
+        await send_subscription_step_1(message, state)
     else:
-        # Иначе просим ввести ник
         await message.answer(
             "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
             "<i>Це потрібно для перевірки виконання умов розіграшу.</i>", 
@@ -231,54 +228,73 @@ async def process_ig(message: types.Message, state: FSMContext):
     phone = fsm_data.get("phone", "Не вказано")
     user_id = message.from_user.id
     
-    # Сохраняем профиль с инстаграмом
     await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "ig": ig, "receipts": 0})
     
-    # Переходим к проверке подписок
-    await send_subscription_check(message, state)
+    # Запускаємо Етап 1 перевірки
+    await send_subscription_step_1(message, state)
 
-
-# --- ФЕЙКОВАЯ ПРОВЕРКА ПОДПИСОК ---
-async def send_subscription_check(message: types.Message, state: FSMContext):
+# --- ЕТАП 1: ПЕРЕВІРКА ПЕРШОЇ СТОРІНКИ ---
+async def send_subscription_step_1(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="1️⃣ Перевірити та підписатися: Сторінка 1", url=INSTAGRAM_LINK_1)],
-            [InlineKeyboardButton(text="2️⃣ Перевірити та підписатися: Сторінка 2", url=INSTAGRAM_LINK_2)],
-            [InlineKeyboardButton(text="🔄 ПЕРЕВІРИТИ ПІДПИСКИ", callback_data="check_subs")]
+            [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
+            [InlineKeyboardButton(text="🔄 Перевірити підписку 1", callback_data="check_sub_1")]
         ]
     )
-    await message.answer(
-        "⚠️ <b>Обов'язкова умова участі!</b>\n\n"
-        "Система перевірить наявність вашої підписки на наші офіційні сторінки в Instagram.\n\n"
-        "Перейдіть за посиланнями та натисніть <b>«Перевірити підписки»</b>.",
-        reply_markup=kb,
-        parse_mode="HTML"
+    text = (
+        "⚠️ <b>Обов'язкова умова участі! (Крок 1 з 2)</b>\n\n"
+        "Система перевірить наявність підписки на нашу першу сторінку.\n"
+        "Перейдіть за посиланням, підпишіться, поверніться сюди та натисніть <b>«Перевірити підписку 1»</b>."
     )
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
     await state.set_state(Registration.waiting_for_subscription)
 
-@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_subs")
-async def process_check_subs(call: CallbackQuery, state: FSMContext):
-    # Этап 1: Меняем сообщение на статус загрузки
-    await call.message.edit_text("⏳ <i>Встановлюється з'єднання з Instagram... Перевірка підписок...</i>", parse_mode="HTML")
+@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_1")
+async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
+    await call.answer()
     
-    # Этап 2: Выдерживаем паузу в 3 секунды (создаем иллюзию проверки)
-    await asyncio.sleep(3)
+    # Імітація завантаження
+    await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка першої підписки...</i>", parse_mode="HTML")
+    await asyncio.sleep(2.5) # Пауза 2.5 секунди
     
-    # Этап 3: Сообщаем об успехе и просим фото
+    # Переходимо на Етап 2
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
+            [InlineKeyboardButton(text="🔄 Перевірити підписку 2", callback_data="check_sub_2")]
+        ]
+    )
+    text = (
+        "✅ <b>Першу підписку підтверджено!</b>\n\n"
+        "⚠️ <b>Крок 2 з 2:</b> Тепер підпишіться на нашу другу сторінку. "
+        "Після підписки натисніть кнопку перевірки нижче."
+    )
+    await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+
+# --- ЕТАП 2: ПЕРЕВІРКА ДРУГОЇ СТОРІНКИ ---
+@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_2")
+async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    
+    # Імітація завантаження
+    await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка другої підписки...</i>", parse_mode="HTML")
+    await asyncio.sleep(2.5) # Пауза 2.5 секунди
+    
+    # Фінал перевірки
     await call.message.edit_text(
-        "✅ <b>Підписки успішно підтверджено!</b>\n\n"
+        "✅ <b>Всі підписки успішно підтверджено!</b> 🎉\n\n"
         "📸 Тепер відправте <b>ФОТО вашого чека</b> для завершення реєстрації:", 
         parse_mode="HTML"
     )
     await state.set_state(Registration.waiting_for_receipt_photo)
 
-# Заглушка, если юзер пишет текст вместо нажатия на кнопку "Перевірити"
+# Заглушка, якщо юзер пише текст замість кнопок перевірки
 @dp.message(Registration.waiting_for_subscription)
 async def force_click_check(message: types.Message):
-    await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 ПЕРЕВІРИТИ ПІДПИСКИ»</b> в повідомленні вище.", parse_mode="HTML")
+    await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
 
-# --- ПРИЕМ ФОТО ---
+# --- ПРИЙОМ ФОТО ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -298,10 +314,10 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
 
-    # 1. Відправка адмінам в Telegram
+    # Відправка адмінам
     admin_caption = (
         f"🆕 <b>Новий чек! (У клієнта чеків: {new_count})</b>\n\n"
-        f"🧾 <b>Номер чека (введений):</b> {receipt_number_text}\n\n"
+        f"🧾 <b>Номер чека:</b> {receipt_number_text}\n\n"
         f"👤 <b>ПІБ:</b> {fio}\n"
         f"📱 <b>Телефон:</b> {phone}\n"
         f"📸 <b>Instagram:</b> {ig}\n"
@@ -313,7 +329,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Помилка відправки в групу: {e}")
 
-    # 2. Відправка в Google Таблицю
+    # Відправка в Google
     if GOOGLE_WEBHOOK_URL:
         google_data = {
             "fio": fio,
@@ -330,10 +346,10 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
                         error_text = await response.text()
                         await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Помилка Google Таблиці! Статус: {response.status}\nТекст: {error_text}")
         except Exception as e:
-            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Технічна помилка підключення до Google: {e}")
+            pass # Ігноруємо дрібні помилки підключення для юзера
 
     await message.answer(
-        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь!", 
+        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші!", 
         reply_markup=get_main_reply_kb(),
         parse_mode="HTML"
     )
