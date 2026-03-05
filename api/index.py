@@ -21,7 +21,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
-SUPPORT_TOPIC_ID = 101 # <-- ВПИШИ СЮДА ID ТЕМЫ (например: 45). Если None - будет слать в общую группу
+SUPPORT_TOPIC_ID = None # <-- ВПИШИ СЮДА ID ТЕМЫ (например: 45). Если None - будет слать в общую группу
 INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
 INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
@@ -406,4 +406,137 @@ async def process_ig(message: types.Message, state: FSMContext):
     
     fsm_data = await state.get_data()
     user_id = message.from_user.id
-    await redis.hset(f"user
+    await redis.hset(f"user:{user_id}", mapping={"fio": fsm_data.get("fio"), "phone": fsm_data.get("phone"), "ig": message.text, "receipts": 0, "sub_checked": "0"})
+    await send_subscription_step_1(message, state)
+
+async def send_subscription_step_1(message: types.Message, state: FSMContext):
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
+        [InlineKeyboardButton(text="🔄 Перевірити підписку 1", callback_data="check_sub_1")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
+    ])
+    await message.answer("⚠️ <b>Обов'язкова умова! (Крок 1)</b>\nПідпишіться на нашу першу сторінку.", reply_markup=kb, parse_mode="HTML")
+    await state.set_state(Registration.waiting_for_subscription)
+
+@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_1")
+async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await call.message.edit_text("⏳ <i>Перевірка...</i>", parse_mode="HTML")
+    await asyncio.sleep(2) 
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
+        [InlineKeyboardButton(text="🔄 Перевірити підписку 2", callback_data="check_sub_2")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
+    ])
+    await call.message.edit_text("✅ <b>Перша є! Крок 2:</b>\nПідпишіться на другу сторінку.", reply_markup=kb, parse_mode="HTML")
+
+@dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_2")
+async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
+    await call.answer()
+    await call.message.edit_text("⏳ <i>Перевірка...</i>", parse_mode="HTML")
+    await asyncio.sleep(2) 
+    
+    await redis.hset(f"user:{call.from_user.id}", "sub_checked", "1")
+    await call.message.edit_text("✅ <b>Всі підписки підтверджено!</b> 🎉", parse_mode="HTML")
+    await call.message.answer("📸 Тепер відправте <b>ФОТО вашого чека</b>:", reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML")
+    await state.set_state(Registration.waiting_for_receipt_photo)
+
+# --- ПРИЙОМ ФОТО ---
+@dp.message(Registration.waiting_for_receipt_photo, F.photo)
+async def process_receipt_photo(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    user_data = await redis.hgetall(f"user:{user_id}")
+    
+    receipt_number_text = (await state.get_data()).get("receipt_number", "Не вказано")
+    
+    if receipt_number_text != "Не вказано":
+        await redis.sadd("used_receipts", receipt_number_text)
+        now_str = (datetime.utcnow() + timedelta(hours=2)).strftime("%d.%m.%Y %H:%M")
+        await redis.rpush(f"user_receipts:{user_id}", f"{now_str}|{receipt_number_text}")
+    
+    await redis.hincrby(f"user:{user_id}", "receipts", 1)
+    new_count = (await redis.hget(f"user:{user_id}", "receipts")).decode('utf-8')
+    
+    tg_username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
+    await redis.hset(f"user:{user_id}", "tg_username", tg_username)
+
+    rm_msg = await message.answer("🔄 Обробка...", reply_markup=ReplyKeyboardRemove())
+    await rm_msg.delete()
+    
+    await message.answer(f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. 🍀", reply_markup=get_back_to_main_inline_kb(), parse_mode="HTML")
+    await state.set_state(None)
+
+    if GOOGLE_WEBHOOK_URL:
+        google_data = {
+            "fio": user_data.get(b'fio', b'').decode('utf-8'),
+            "phone": user_data.get(b'phone', b'').decode('utf-8'),
+            "tg_username": tg_username,
+            "ig_username": user_data.get(b'ig', b'').decode('utf-8'),
+            "receipt_count": new_count,
+            "receipt_number": receipt_number_text
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post(GOOGLE_WEBHOOK_URL, json=google_data)
+        except: pass
+
+    admin_caption = (
+        f"🆕 <b>Новий чек!</b> (У клієнта: {new_count})\n\n🧾 <b>Номер:</b> {receipt_number_text}\n"
+        f"👤 <b>ПІБ:</b> {google_data['fio']}\n📱 <b>Телефон:</b> {google_data['phone']}\n"
+        f"📸 <b>Instagram:</b> {google_data['ig_username']}\n💬 <b>Юзернейм:</b> {tg_username}"
+    )
+    
+    admin_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Ок (Сховати)", callback_data="approve_hide"),
+         InlineKeyboardButton(text="❌ ВІДХИЛИТИ", callback_data=f"reject_{user_id}_{receipt_number_text}")]
+    ])
+    
+    kwargs = {"chat_id": ADMIN_ID, "parse_mode": "HTML", "reply_markup": admin_kb}
+    if SUPPORT_TOPIC_ID: kwargs["message_thread_id"] = int(SUPPORT_TOPIC_ID) # Чеки теж можна слати в загальний топік або залишити без нього
+    
+    try: await bot.send_photo(photo=message.photo[-1].file_id, caption=admin_caption, **kwargs)
+    except: pass
+
+@dp.message(Registration.waiting_for_receipt_photo)
+async def error_receipt_format(message: types.Message):
+    await message.answer("⚠️ Надішліть саме <b>ФОТО</b>.", parse_mode="HTML", reply_markup=get_inline_back_kb())
+
+# --- МОДЕРАЦІЯ ЧЕКІВ ---
+@dp.callback_query(F.data == "approve_hide")
+async def admin_approve(call: CallbackQuery):
+    caption = call.message.html_text or call.message.caption or "Чек"
+    admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
+    await call.message.edit_caption(caption=caption + f"\n\n✅ <b>Перевірено:</b> {admin_name}", parse_mode="HTML", reply_markup=None)
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def admin_reject(call: CallbackQuery):
+    parts = call.data.split("_")
+    user_id, receipt_number = int(parts[1]), parts[2]
+    
+    await redis.srem("used_receipts", receipt_number)
+    items = await redis.lrange(f"user_receipts:{user_id}", 0, -1)
+    for item in items:
+        if item.decode('utf-8').endswith(f"|{receipt_number}"):
+            await redis.lrem(f"user_receipts:{user_id}", 1, item)
+            break
+            
+    await redis.hincrby(f"user:{user_id}", "receipts", -1)
+    try: await bot.send_message(chat_id=user_id, text=f"⚠️ Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.", parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
+    except: pass
+        
+    caption = call.message.html_text or call.message.caption or "Чек"
+    admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
+    await call.message.edit_caption(caption=caption + f"\n\n❌ <b>ВІДХИЛЕНО:</b> {admin_name}", parse_mode="HTML", reply_markup=None)
+
+# --- WEBHOOK ---
+@app.get("/")
+async def health_check(): return {"status": "ok"}
+
+@app.post("/api/webhook")
+async def telegram_webhook(request: Request):
+    try:
+        await dp.feed_update(bot, types.Update(**await request.json()))
+        return {"status": "ok"}
+    except Exception as e:
+        return {"status": "error"}
