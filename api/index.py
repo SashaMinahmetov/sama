@@ -12,7 +12,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import (
     ReplyKeyboardRemove,
-    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 )
 from redis.asyncio import Redis
 
@@ -21,7 +21,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
-SUPPORT_TOPIC_ID = None # <-- ВПИШИ СЮДА ID ТЕМЫ (например: 45). Если None - будет слать в общую группу
+SUPPORT_TOPIC_ID = 101 # <-- ВПИШИ СЮДА ID ТЕМЫ (например: 45). Если None - будет слать в общую группу
 INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
 INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
@@ -46,7 +46,7 @@ class Registration(StatesGroup):
     waiting_for_receipt_photo = State()  
 
 class Support(StatesGroup):
-    waiting_for_message = State() # Стан для очікування повідомлення в підтримку
+    waiting_for_message = State()
 
 # --- КЛАВІАТУРИ ---
 def get_inline_start_kb():
@@ -207,20 +207,16 @@ async def cmd_sendall(message: types.Message):
 # --- ЗВОРОТНИЙ ЗВ'ЯЗОК (АДМІН ВІДПОВІДАЄ КОРИСТУВАЧУ) ---
 @dp.message(F.chat.id == int(ADMIN_ID), F.reply_to_message)
 async def admin_reply_to_support(message: types.Message):
-    # Перевіряємо, чи це відповідь на повідомлення від самого бота
     orig = message.reply_to_message
     if orig.from_user.id != bot.id: return
         
     text_to_search = orig.text or orig.caption or ""
-    # Шукаємо ID: 12345678 в тексті
     match = re.search(r"ID:\s*(\d+)", text_to_search)
     
     if match:
         target_user_id = int(match.group(1))
         try:
-            # Копіюємо відповідь адміна (текст, фото, відео) клієнту
             await message.copy_to(target_user_id)
-            # Відправляємо адміну підтвердження (можна видалити, якщо дратує)
             reply_msg = await message.reply("✅ Відповідь доставлено!")
             await asyncio.sleep(3)
             await reply_msg.delete()
@@ -311,7 +307,12 @@ async def start_upload_call(call: CallbackQuery, state: FSMContext):
 async def process_support_msg(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
-    fio = user_data.get(b'fio', b'Не вказано').decode('utf-8') if user_data else "Гість"
+    
+    # ИСПРАВЛЕНО ЗДЕСЬ (Убрал кириллицу из байтов):
+    fio = user_data.get(b'fio', b'').decode('utf-8') if user_data else ""
+    if not fio:
+        fio = "Гість"
+        
     username = f"@{message.from_user.username}" if message.from_user.username else "Без юзернейму"
     
     header = f"🆘 <b>ЗАПИТ У ПІДТРИМКУ</b>\n👤 <b>Від:</b> {fio} ({username})\n🆔 <b>ID:</b> {user_id}\n\n"
@@ -493,7 +494,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     ])
     
     kwargs = {"chat_id": ADMIN_ID, "parse_mode": "HTML", "reply_markup": admin_kb}
-    if SUPPORT_TOPIC_ID: kwargs["message_thread_id"] = int(SUPPORT_TOPIC_ID) # Чеки теж можна слати в загальний топік або залишити без нього
+    if SUPPORT_TOPIC_ID: kwargs["message_thread_id"] = int(SUPPORT_TOPIC_ID) 
     
     try: await bot.send_photo(photo=message.photo[-1].file_id, caption=admin_caption, **kwargs)
     except: pass
