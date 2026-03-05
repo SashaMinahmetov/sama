@@ -124,14 +124,24 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
-# --- НОВА КОМАНДА: СТАТИСТИКА (/stats) ---
+# --- СЕКРЕТНАЯ КОМАНДА: ОЧИСТКА БАЗЫ ДАННЫХ ---
+@dp.message(Command("cleardb"))
+async def cmd_cleardb(message: types.Message):
+    if str(message.chat.id) != ADMIN_ID: return 
+    
+    # Очищаем всю базу данных Redis
+    await redis.flushdb()
+    
+    await message.answer("🧹 <b>База даних ПОВНІСТЮ ОЧИЩЕНА!</b>\n\nВсі користувачі, їхні профілі та використані номери чеків видалені. Бот готовий до реального запуску.", parse_mode="HTML")
+
+# --- КОМАНДА: СТАТИСТИКА (/stats) ---
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
     
     users_keys = await redis.keys("user:*")
     users_count = len(users_keys)
-    unique_receipts = await redis.scard("used_receipts") # Рахуємо унікальні чеки
+    unique_receipts = await redis.scard("used_receipts") 
     
     stats_text = (
         "📊 <b>Статистика розіграшу:</b>\n\n"
@@ -215,12 +225,10 @@ async def process_phone(message: types.Message, state: FSMContext):
     )
     await state.set_state(Registration.waiting_for_receipt_number)
 
-# --- ОНОВЛЕНО: ЗАХИСТ ВІД ДУБЛІКАТІВ ---
 @dp.message(Registration.waiting_for_receipt_number)
 async def process_receipt_number(message: types.Message, state: FSMContext):
-    receipt_num = message.text.strip().upper() # Зберігаємо у верхньому регістрі для точності
+    receipt_num = message.text.strip().upper() 
     
-    # Перевіряємо, чи є такий чек у базі
     is_used = await redis.sismember("used_receipts", receipt_num)
     if is_used:
         await message.answer(
@@ -229,7 +237,7 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
             parse_mode="HTML",
             reply_markup=get_cancel_kb()
         )
-        return # Зупиняємо функцію, чекаємо інший номер
+        return 
         
     await state.update_data(receipt_number=receipt_num)
     
@@ -309,7 +317,6 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
 async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
-# --- ОНОВЛЕНО: ДОДАЄМО ЧЕК В БАЗУ ВИКОРИСТАНИХ ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -322,7 +329,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
-    # ЗАПИСУЄМО ЧЕК В БАЗУ, ЩОБ БІЛЬШЕ НЕ ПРИЙМАТИ
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
     
