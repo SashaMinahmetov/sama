@@ -87,7 +87,7 @@ async def process_show_cabinet(target_message, user_id: int):
         f"🔸 <b>ПІБ:</b> {fio}\n"
         f"🔸 <b>Телефон:</b> {phone}\n"
         f"🔸 <b>Instagram:</b> {ig}\n"
-        f"🎫 <b>Успішно схвалено чеків:</b> {receipts_count}\n\n"
+        f"🎫 <b>Зареєстровано чеків:</b> {receipts_count}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
     await target_message.answer(cabinet_text, parse_mode="HTML")
@@ -141,7 +141,7 @@ async def cmd_stats(message: types.Message):
     stats_text = (
         "📊 <b>Статистика розіграшу:</b>\n\n"
         f"👤 Усього учасників: <b>{users_count}</b>\n"
-        f"🧾 Чеків на модерації та схвалених: <b>{unique_receipts}</b>"
+        f"🧾 Чеків у базі: <b>{unique_receipts}</b>"
     )
     await message.answer(stats_text, parse_mode="HTML")
 
@@ -247,7 +247,7 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
     is_used = await redis.sismember("used_receipts", receipt_num)
     if is_used:
         await message.answer(
-            "⚠️ <b>Помилка!</b> Чек з таким номером вже був зареєстрований або зараз на модерації.\n"
+            "⚠️ <b>Помилка!</b> Чек з таким номером вже був зареєстрований у системі.\n"
             "Спробуйте ввести інший номер:",
             parse_mode="HTML",
             reply_markup=get_cancel_kb()
@@ -259,8 +259,20 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     
+    # ПЕРЕВІРКА: Чи користувач вже проходив підписку раніше?
+    is_sub_checked = user_data.get(b'sub_checked', b'0').decode('utf-8') == '1'
+    
     if user_data and b'ig' in user_data:
-        await send_subscription_step_1(message, state)
+        if is_sub_checked:
+            # ПРОПУСКАЄМО ПІДПИСКИ, ВІДРАЗУ ФОТО
+            await message.answer(
+                "📸 Тепер відправте <b>ФОТО вашого чека</b>:", 
+                reply_markup=get_cancel_kb(),
+                parse_mode="HTML"
+            )
+            await state.set_state(Registration.waiting_for_receipt_photo)
+        else:
+            await send_subscription_step_1(message, state)
     else:
         await message.answer(
             "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
@@ -278,7 +290,7 @@ async def process_ig(message: types.Message, state: FSMContext):
     phone = fsm_data.get("phone", "Не вказано")
     user_id = message.from_user.id
     
-    await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "ig": ig, "receipts": 0})
+    await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "ig": ig, "receipts": 0, "sub_checked": "0"})
     await send_subscription_step_1(message, state)
 
 async def send_subscription_step_1(message: types.Message, state: FSMContext):
@@ -321,9 +333,12 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка другої підписки...</i>", parse_mode="HTML")
     await asyncio.sleep(2.5) 
     
+    # ЗБЕРІГАЄМО, ЩО КОРИСТУВАЧ ПРОЙШОВ ПЕРЕВІРКУ
+    await redis.hset(f"user:{call.from_user.id}", "sub_checked", "1")
+    
     await call.message.edit_text(
         "✅ <b>Всі підписки успішно підтверджено!</b> 🎉\n\n"
-        "📸 Тепер відправте <b>ФОТО вашого чека</b> для відправки на модерацію:", 
+        "📸 Тепер відправте <b>ФОТО вашого чека</b> для реєстрації:", 
         parse_mode="HTML"
     )
     await state.set_state(Registration.waiting_for_receipt_photo)
@@ -332,7 +347,8 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
 async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
-# --- ВІДПРАВКА НА МОДЕРАЦІЮ АДМІНІСТРАТОРУ ---
+
+# --- ПРИЙОМ ФОТО: МОМЕНТАЛЬНЕ УХВАЛЕННЯ ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -341,37 +357,60 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fio = user_data.get(b'fio', b'').decode('utf-8')
     phone = user_data.get(b'phone', b'').decode('utf-8')
     ig = user_data.get(b'ig', b'').decode('utf-8')
+    tg_username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
     
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
+    # 1. ЗАПИСУЄМО В БАЗУ (щоб уникнути дублікатів)
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
     
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
+    await redis.hset(f"user:{user_id}", "tg_username", tg_username)
 
+    # 2. ВІДПРАВКА В GOOGLE ТАБЛИЦЮ ОДРАЗУ
+    if GOOGLE_WEBHOOK_URL:
+        google_data = {
+            "fio": fio,
+            "phone": phone,
+            "tg_username": tg_username,
+            "ig_username": ig,
+            "receipt_count": new_count,
+            "receipt_number": receipt_number_text
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post(GOOGLE_WEBHOOK_URL, json=google_data)
+        except Exception:
+            pass
+
+    # 3. ВІДПРАВЛЯЄМО РАДІСНЕ ПОВІДОМЛЕННЯ КЛІЄНТУ ОДРАЗУ
+    await message.answer(
+        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші! 🍀", 
+        reply_markup=get_main_reply_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(None)
+
+    # 4. ВІДПРАВЛЯЄМО АДМІНУ (для модерації "на всяк випадок")
     photo_id = message.photo[-1].file_id
-    username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
-    
-    await redis.hset(f"user:{user_id}", "tg_username", username)
-
     admin_caption = (
-        f"🆕 <b>Новий чек на модерацію!</b>\n\n"
-        f"🧾 <b>Номер чека:</b> {receipt_number_text}\n\n"
+        f"🆕 <b>Новий чек прийнято системою!</b> (У клієнта: {new_count})\n\n"
+        f"🧾 <b>Номер чека:</b> {receipt_number_text}\n"
         f"👤 <b>ПІБ:</b> {fio}\n"
         f"📱 <b>Телефон:</b> {phone}\n"
         f"📸 <b>Instagram:</b> {ig}\n"
-        f"💬 <b>TG Юзернейм:</b> {username}\n"
-        f"🎫 <b>Поточний лічильник чеків юзера:</b> {new_count}"
+        f"💬 <b>TG Юзернейм:</b> {tg_username}"
     )
     
     admin_kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Прийняти", callback_data=f"approve_{user_id}_{receipt_number_text}_{new_count}"),
-                InlineKeyboardButton(text="❌ Відхилити", callback_data=f"reject_{user_id}_{receipt_number_text}")
+                InlineKeyboardButton(text="✅ Ок (Сховати)", callback_data=f"approve_hide"),
+                InlineKeyboardButton(text="❌ ВІДХИЛИТИ (Брак)", callback_data=f"reject_{user_id}_{receipt_number_text}")
             ]
         ]
     )
@@ -381,69 +420,24 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Помилка відправки в групу: {e}")
 
-    await message.answer(
-        f"⏳ <b>Фото отримано!</b>\n\nВаш чек №{receipt_number_text} відправлено на модерацію адміністратору.\n"
-        "Ми повідомимо вас про результат перевірки!", 
-        reply_markup=get_main_reply_kb(),
-        parse_mode="HTML"
-    )
-    await state.set_state(None)
-
 @dp.message(Registration.waiting_for_receipt_photo)
 async def error_receipt_format(message: types.Message):
     await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸 (документи або текст не приймаються).", parse_mode="HTML")
 
-
 # --- ОБРОБНИКИ КНОПОК МОДЕРАЦІЇ ---
 
-@dp.callback_query(F.data.startswith("approve_"))
+@dp.callback_query(F.data == "approve_hide")
 async def admin_approve(call: CallbackQuery):
-    parts = call.data.split("_")
-    user_id = int(parts[1])
-    receipt_number = parts[2]
-    new_count = parts[3]
-    
-    user_data = await redis.hgetall(f"user:{user_id}")
-    fio = user_data.get(b'fio', b'').decode('utf-8')
-    phone = user_data.get(b'phone', b'').decode('utf-8')
-    ig = user_data.get(b'ig', b'').decode('utf-8')
-    
-    # Виправлено помилку з ASCII:
-    tg_username = user_data.get(b'tg_username', b'').decode('utf-8') or "Немає"
-    
-    if GOOGLE_WEBHOOK_URL:
-        google_data = {
-            "fio": fio,
-            "phone": phone,
-            "tg_username": tg_username,
-            "ig_username": ig,
-            "receipt_count": new_count,
-            "receipt_number": receipt_number
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                await session.post(GOOGLE_WEBHOOK_URL, json=google_data)
-        except Exception:
-            pass 
-            
-    try:
-        await bot.send_message(
-            chat_id=user_id, 
-            text=f"🎉 <b>Вітаємо!</b> Ваш чек №{receipt_number} перевірено та <b>СХВАЛЕНО</b> модератором!\nТепер він офіційно бере участь у розіграші 🍀", 
-            parse_mode="HTML"
-        )
-    except Exception:
-        pass
-        
+    # Просто ховаємо кнопки, щоб чек не заважав
     original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
     admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
 
     await call.message.edit_caption(
-        caption=original_caption + f"\n\n✅ <b>СХВАЛЕНО:</b> {admin_name}", 
+        caption=original_caption + f"\n\n✅ <b>Перевірено:</b> {admin_name}", 
         parse_mode="HTML", 
         reply_markup=None
     )
-    await call.answer("Чек успішно схвалено!")
+    await call.answer("Ок!")
 
 @dp.callback_query(F.data.startswith("reject_"))
 async def admin_reject(call: CallbackQuery):
@@ -451,18 +445,22 @@ async def admin_reject(call: CallbackQuery):
     user_id = int(parts[1])
     receipt_number = parts[2]
     
+    # Видаляємо номер з бази (дозволяємо завантажити ще раз)
     await redis.srem("used_receipts", receipt_number)
+    # Мінусуємо лічильник чеків у юзера
     await redis.hincrby(f"user:{user_id}", "receipts", -1)
     
+    # Пишемо клієнту, що його чек відхилили
     try:
         await bot.send_message(
             chat_id=user_id, 
-            text=f"⚠️ <b>Увага!</b> Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.\nМожливо, фото нечітке або чек не відповідає умовам.\nВи можете завантажити його правильно ще раз.", 
+            text=f"⚠️ <b>Увага!</b> Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.\nМожливо, фото нечітке, обрізане або чек не відповідає умовам.\n\nБудь ласка, завантажте цей чек правильно ще раз через меню «🧾 Завантажити чек».", 
             parse_mode="HTML"
         )
     except Exception:
         pass
         
+    # Змінюємо статус у групі адмінів
     original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
     admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
 
