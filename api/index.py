@@ -21,7 +21,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
-SUPPORT_TOPIC_ID = 101 # <-- ВПИШИ СЮДА ID ТЕМЫ (например: 45). Если None - будет слать в общую группу
+SUPPORT_TOPIC_ID = 101  # <-- ВПИШИ СЮДА ID ТЕМЫ ДЛЯ ТЕХПОДДЕРЖКИ (например: 45)
+RECEIPTS_TOPIC_ID = 117 # <-- ВПИШИ СЮДА ID ТЕМЫ ДЛЯ ЧЕКОВ (например: 56)
 INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
 INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
@@ -221,7 +222,7 @@ async def admin_reply_to_support(message: types.Message):
             await asyncio.sleep(3)
             await reply_msg.delete()
         except Exception as e:
-            await message.reply(f"⚠️ Помилка відправки. Можливо, клієнт заблокував бота. ({e})")
+            await message.reply(f"⚠️ Помилка отправки. Возможно, клиент заблокировал бота. ({e})")
 
 
 # --- ОБРОБНИКИ НАВІГАЦІЇ (INLINE) ---
@@ -230,9 +231,9 @@ async def support_btn_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await call.message.edit_text(
         "💬 <b>Служба підтримки</b>\n\n"
-        "Опишіть вашу проблему або запитання в одному повідомленні (можна додати фото).\n"
+        "Опишіть вашу проблему або запитання. Ми працюємо у режимі чату: ви можете відправляти текст, фото чи відео.\n"
         "Наш менеджер відповість вам прямо в цьому боті найближчим часом:",
-        reply_markup=get_inline_back_kb(),
+        reply_markup=get_back_to_main_inline_kb(),
         parse_mode="HTML"
     )
     await state.set_state(Support.waiting_for_message)
@@ -302,13 +303,12 @@ async def start_upload_call(call: CallbackQuery, state: FSMContext):
     await process_start_upload(call.message, call.from_user.id, state)
 
 
-# --- ВОРОНКА ТЕХПІДТРИМКИ ---
+# --- ВОРОНКА ТЕХПІДТРИМКИ (БЕЗПЕРЕРВНИЙ ЧАТ) ---
 @dp.message(Support.waiting_for_message)
 async def process_support_msg(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # ИСПРАВЛЕНО ЗДЕСЬ (Убрал кириллицу из байтов):
     fio = user_data.get(b'fio', b'').decode('utf-8') if user_data else ""
     if not fio:
         fio = "Гість"
@@ -327,15 +327,21 @@ async def process_support_msg(message: types.Message, state: FSMContext):
         elif message.photo:
             caption = header + (message.html_text or "")
             await bot.send_photo(photo=message.photo[-1].file_id, caption=caption, **kwargs)
+        elif message.video:
+            caption = header + (message.html_text or "")
+            await bot.send_video(video=message.video.file_id, caption=caption, **kwargs)
+        elif message.document:
+            caption = header + (message.html_text or "")
+            await bot.send_document(document=message.document.file_id, caption=caption, **kwargs)
         else:
-            await message.answer("⚠️ Будь ласка, надішліть текст або фотографію.", reply_markup=get_inline_back_kb())
+            await message.answer("⚠️ Будь ласка, надішліть текст, фото, відео або документ.", reply_markup=get_back_to_main_inline_kb())
             return
             
-        await message.answer("✅ <b>Ваш запит успішно надіслано!</b>\nОчікуйте на відповідь.", reply_markup=get_back_to_main_inline_kb(), parse_mode="HTML")
-        await state.set_state(None)
+        await message.answer("✅ <i>Надіслано! Можете написати ще або повернутися в меню 👇</i>", reply_markup=get_back_to_main_inline_kb(), parse_mode="HTML")
+        
     except Exception as e:
         logging.error(f"Support Error: {e}")
-        await message.answer(f"⚠️ Виникла технічна помилка.", reply_markup=get_inline_back_kb())
+        await message.answer(f"⚠️ Виникла технічна помилка.", reply_markup=get_back_to_main_inline_kb())
 
 
 # --- ВОРОНКА РЕЄСТРАЦІЇ ---
@@ -494,8 +500,11 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     ])
     
     kwargs = {"chat_id": ADMIN_ID, "parse_mode": "HTML", "reply_markup": admin_kb}
-    if SUPPORT_TOPIC_ID: kwargs["message_thread_id"] = int(SUPPORT_TOPIC_ID) 
     
+    # ОТПРАВЛЯЕМ ФОТО В НУЖНЫЙ ТОПИК (ТЕМУ), ЕСЛИ ОН УКАЗАН В НАСТРОЙКАХ
+    if RECEIPTS_TOPIC_ID: 
+        kwargs["message_thread_id"] = int(RECEIPTS_TOPIC_ID)
+        
     try: await bot.send_photo(photo=message.photo[-1].file_id, caption=admin_caption, **kwargs)
     except: pass
 
