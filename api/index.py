@@ -55,8 +55,14 @@ def get_main_reply_kb():
 def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt")],
-            [InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")]
+            [
+                InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt"),
+                InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")
+            ],
+            [
+                InlineKeyboardButton(text="🎁 Умови розіграшу", callback_data="show_rules"),
+                InlineKeyboardButton(text="🏆 Призи та FAQ", callback_data="show_faq")
+            ]
         ]
     )
 
@@ -109,6 +115,32 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
             parse_mode="HTML"
         )
         await state.set_state(Registration.waiting_for_receipt_number)
+
+async def process_show_rules(target_message):
+    rules = (
+        "📜 <b>Умови дуже прості:</b>\n\n"
+        "1️⃣ Бути підписаним на наші 2 сторінки в Instagram.\n"
+        "2️⃣ Купувати нашу акційну продукцію.\n"
+        "3️⃣ Натискати «Завантажити чек» у цьому боті.\n"
+        "4️⃣ Вводити номер чека та надсилати його фото.\n\n"
+        "Більше чеків — більше шансів на перемогу! 🍀"
+    )
+    await target_message.answer(rules, parse_mode="HTML")
+
+async def process_show_faq(target_message):
+    faq_text = (
+        "🏆 <b>Призовий фонд та Часті запитання:</b>\n\n"
+        "🎁 <b>Що можна виграти?</b>\n"
+        "• Головний приз: <b>[Напиши тут головний приз]</b>\n"
+        "• Щотижневі призи: <b>[Напиши тут інші призи]</b>\n\n"
+        "📅 <b>Коли відбудеться розіграш?</b>\n"
+        "Розіграш відбудеться <b>[Вкажи дату]</b> у прямому ефірі на нашій сторінці в Instagram.\n\n"
+        "❓ <b>Скільки чеків можна завантажити?</b>\n"
+        "Необмежену кількість! Більше унікальних чеків — більше шансів на перемогу.\n\n"
+        "❓ <b>Чи потрібно зберігати паперовий чек?</b>\n"
+        "Так, <b>ОБОВ'ЯЗКОВО</b> зберігайте оригінал чека до кінця розіграшу. Без нього отримати приз буде неможливо!"
+    )
+    await target_message.answer(faq_text, parse_mode="HTML")
 
 # --- ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ---
 @dp.message(Command("start"))
@@ -164,34 +196,26 @@ async def cmd_sendall(message: types.Message):
             error_count += 1
     await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Доставлено: {success_count}\n🔴 Помилок: {error_count}", parse_mode="HTML")
 
+# ОБРОБНИКИ ДЛЯ УМОВ ТА FAQ (КНОПКИ ТА INLINE)
 @dp.message(F.text == "🎁 Умови розіграшу")
-async def show_rules(message: types.Message):
-    rules = (
-        "📜 <b>Умови дуже прості:</b>\n\n"
-        "1️⃣ Бути підписаним на наші 2 сторінки в Instagram.\n"
-        "2️⃣ Купувати нашу акційну продукцію.\n"
-        "3️⃣ Натискати «Завантажити чек» у цьому боті.\n"
-        "4️⃣ Вводити номер чека та надсилати його фото.\n\n"
-        "Більше чеків — більше шансів на перемогу! 🍀"
-    )
-    await message.answer(rules, parse_mode="HTML")
+async def show_rules_msg(message: types.Message):
+    await process_show_rules(message)
+
+@dp.callback_query(F.data == "show_rules")
+async def show_rules_call(call: CallbackQuery):
+    await call.answer()
+    await process_show_rules(call.message)
 
 @dp.message(F.text == "🏆 Призи та FAQ")
-async def show_faq(message: types.Message):
-    faq_text = (
-        "🏆 <b>Призовий фонд та Часті запитання:</b>\n\n"
-        "🎁 <b>Що можна виграти?</b>\n"
-        "• Головний приз: <b>[Напиши тут головний приз]</b>\n"
-        "• Щотижневі призи: <b>[Напиши тут інші призи]</b>\n\n"
-        "📅 <b>Коли відбудеться розіграш?</b>\n"
-        "Розіграш відбудеться <b>[Вкажи дату]</b> у прямому ефірі на нашій сторінці в Instagram.\n\n"
-        "❓ <b>Скільки чеків можна завантажити?</b>\n"
-        "Необмежену кількість! Більше унікальних чеків — більше шансів на перемогу.\n\n"
-        "❓ <b>Чи потрібно зберігати паперовий чек?</b>\n"
-        "Так, <b>ОБОВ'ЯЗКОВО</b> зберігайте оригінал чека до кінця розіграшу. Без нього отримати приз буде неможливо!"
-    )
-    await message.answer(faq_text, parse_mode="HTML")
+async def show_faq_msg(message: types.Message):
+    await process_show_faq(message)
 
+@dp.callback_query(F.data == "show_faq")
+async def show_faq_call(call: CallbackQuery):
+    await call.answer()
+    await process_show_faq(call.message)
+
+# ОБРОБНИКИ КАБІНЕТУ ТА ЗАВАНТАЖЕННЯ ЧЕКА
 @dp.message(F.text == "👤 Мій кабінет")
 async def show_cabinet_msg(message: types.Message):
     await process_show_cabinet(message, message.from_user.id)
@@ -210,6 +234,7 @@ async def start_upload_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await process_start_upload(call.message, call.from_user.id, state)
 
+# --- ВОРОНКА РЕЄСТРАЦІЇ ---
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     await state.update_data(fio=message.text)
@@ -259,12 +284,10 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # ПЕРЕВІРКА: Чи користувач вже проходив підписку раніше?
     is_sub_checked = user_data.get(b'sub_checked', b'0').decode('utf-8') == '1'
     
     if user_data and b'ig' in user_data:
         if is_sub_checked:
-            # ПРОПУСКАЄМО ПІДПИСКИ, ВІДРАЗУ ФОТО
             await message.answer(
                 "📸 Тепер відправте <b>ФОТО вашого чека</b>:", 
                 reply_markup=get_cancel_kb(),
@@ -333,7 +356,6 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка другої підписки...</i>", parse_mode="HTML")
     await asyncio.sleep(2.5) 
     
-    # ЗБЕРІГАЄМО, ЩО КОРИСТУВАЧ ПРОЙШОВ ПЕРЕВІРКУ
     await redis.hset(f"user:{call.from_user.id}", "sub_checked", "1")
     
     await call.message.edit_text(
@@ -348,7 +370,7 @@ async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
 
-# --- ПРИЙОМ ФОТО: МОМЕНТАЛЬНЕ УХВАЛЕННЯ ---
+# --- ПРИЙОМ ФОТО ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -362,7 +384,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
-    # 1. ЗАПИСУЄМО В БАЗУ (щоб уникнути дублікатів)
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
     
@@ -371,7 +392,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     new_count = new_count.decode('utf-8')
     await redis.hset(f"user:{user_id}", "tg_username", tg_username)
 
-    # 2. ВІДПРАВКА В GOOGLE ТАБЛИЦЮ ОДРАЗУ
     if GOOGLE_WEBHOOK_URL:
         google_data = {
             "fio": fio,
@@ -387,7 +407,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         except Exception:
             pass
 
-    # 3. ВІДПРАВЛЯЄМО РАДІСНЕ ПОВІДОМЛЕННЯ КЛІЄНТУ ОДРАЗУ
     await message.answer(
         f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші! 🍀", 
         reply_markup=get_main_reply_kb(),
@@ -395,7 +414,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     )
     await state.set_state(None)
 
-    # 4. ВІДПРАВЛЯЄМО АДМІНУ (для модерації "на всяк випадок")
     photo_id = message.photo[-1].file_id
     admin_caption = (
         f"🆕 <b>Новий чек прийнято системою!</b> (У клієнта: {new_count})\n\n"
@@ -428,7 +446,6 @@ async def error_receipt_format(message: types.Message):
 
 @dp.callback_query(F.data == "approve_hide")
 async def admin_approve(call: CallbackQuery):
-    # Просто ховаємо кнопки, щоб чек не заважав
     original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
     admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
 
@@ -445,12 +462,9 @@ async def admin_reject(call: CallbackQuery):
     user_id = int(parts[1])
     receipt_number = parts[2]
     
-    # Видаляємо номер з бази (дозволяємо завантажити ще раз)
     await redis.srem("used_receipts", receipt_number)
-    # Мінусуємо лічильник чеків у юзера
     await redis.hincrby(f"user:{user_id}", "receipts", -1)
     
-    # Пишемо клієнту, що його чек відхилили
     try:
         await bot.send_message(
             chat_id=user_id, 
@@ -460,7 +474,6 @@ async def admin_reject(call: CallbackQuery):
     except Exception:
         pass
         
-    # Змінюємо статус у групі адмінів
     original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
     admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
 
