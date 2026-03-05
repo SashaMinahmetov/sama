@@ -19,8 +19,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
-INSTAGRAM_LINK_1 = "https://www.instagram.com/tm.sama.ua/" 
-INSTAGRAM_LINK_2 = "https://www.instagram.com/koshik_shop_/" 
+INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
+INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
@@ -39,7 +39,7 @@ class Registration(StatesGroup):
     waiting_for_phone = State()
     waiting_for_receipt_number = State() 
     waiting_for_ig = State()             
-    waiting_for_subscription = State()   # Стан для поетапної перевірки
+    waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
 
 # --- КЛАВІАТУРИ ---
@@ -95,7 +95,6 @@ async def process_show_cabinet(target_message, user_id: int):
 async def process_start_upload(target_message, user_id: int, state: FSMContext):
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # Якщо новий користувач
     if not user_data or b'ig' not in user_data:
         await target_message.answer(
             "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
@@ -104,7 +103,6 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
         )
         await state.set_state(Registration.waiting_for_fio)
     else:
-        # Якщо вже є в базі
         await target_message.answer(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
             reply_markup=get_cancel_kb(),
@@ -126,6 +124,22 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
+# --- НОВА КОМАНДА: СТАТИСТИКА (/stats) ---
+@dp.message(Command("stats"))
+async def cmd_stats(message: types.Message):
+    if str(message.chat.id) != ADMIN_ID: return 
+    
+    users_keys = await redis.keys("user:*")
+    users_count = len(users_keys)
+    unique_receipts = await redis.scard("used_receipts") # Рахуємо унікальні чеки
+    
+    stats_text = (
+        "📊 <b>Статистика розіграшу:</b>\n\n"
+        f"👤 Усього учасників: <b>{users_count}</b>\n"
+        f"🧾 Унікальних чеків: <b>{unique_receipts}</b>"
+    )
+    await message.answer(stats_text, parse_mode="HTML")
+
 @dp.message(Command("sendall"))
 async def cmd_sendall(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
@@ -141,7 +155,7 @@ async def cmd_sendall(message: types.Message):
         try:
             await bot.send_message(chat_id=int(user_id_str), text=text_to_send, parse_mode="HTML")
             success_count += 1
-        except Exception as e:
+        except Exception:
             error_count += 1
     await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Доставлено: {success_count}\n🔴 Помилок: {error_count}", parse_mode="HTML")
 
@@ -201,14 +215,27 @@ async def process_phone(message: types.Message, state: FSMContext):
     )
     await state.set_state(Registration.waiting_for_receipt_number)
 
+# --- ОНОВЛЕНО: ЗАХИСТ ВІД ДУБЛІКАТІВ ---
 @dp.message(Registration.waiting_for_receipt_number)
 async def process_receipt_number(message: types.Message, state: FSMContext):
-    await state.update_data(receipt_number=message.text)
+    receipt_num = message.text.strip().upper() # Зберігаємо у верхньому регістрі для точності
+    
+    # Перевіряємо, чи є такий чек у базі
+    is_used = await redis.sismember("used_receipts", receipt_num)
+    if is_used:
+        await message.answer(
+            "⚠️ <b>Помилка!</b> Чек з таким номером вже був зареєстрований у системі.\n"
+            "Спробуйте ввести інший номер або перевірте правильність вводу:",
+            parse_mode="HTML",
+            reply_markup=get_cancel_kb()
+        )
+        return # Зупиняємо функцію, чекаємо інший номер
+        
+    await state.update_data(receipt_number=receipt_num)
     
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    # Якщо інстаграм вже є, одразу йдемо на Етап 1 перевірки
     if user_data and b'ig' in user_data:
         await send_subscription_step_1(message, state)
     else:
@@ -229,11 +256,8 @@ async def process_ig(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     
     await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "ig": ig, "receipts": 0})
-    
-    # Запускаємо Етап 1 перевірки
     await send_subscription_step_1(message, state)
 
-# --- ЕТАП 1: ПЕРЕВІРКА ПЕРШОЇ СТОРІНКИ ---
 async def send_subscription_step_1(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -252,12 +276,9 @@ async def send_subscription_step_1(message: types.Message, state: FSMContext):
 @dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_1")
 async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    
-    # Імітація завантаження
     await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка першої підписки...</i>", parse_mode="HTML")
-    await asyncio.sleep(2.5) # Пауза 2.5 секунди
+    await asyncio.sleep(2.5) 
     
-    # Переходимо на Етап 2
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
@@ -271,16 +292,12 @@ async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
     )
     await call.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
 
-# --- ЕТАП 2: ПЕРЕВІРКА ДРУГОЇ СТОРІНКИ ---
 @dp.callback_query(Registration.waiting_for_subscription, F.data == "check_sub_2")
 async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
     await call.answer()
-    
-    # Імітація завантаження
     await call.message.edit_text("⏳ <i>З'єднання з Instagram... Перевірка другої підписки...</i>", parse_mode="HTML")
-    await asyncio.sleep(2.5) # Пауза 2.5 секунди
+    await asyncio.sleep(2.5) 
     
-    # Фінал перевірки
     await call.message.edit_text(
         "✅ <b>Всі підписки успішно підтверджено!</b> 🎉\n\n"
         "📸 Тепер відправте <b>ФОТО вашого чека</b> для завершення реєстрації:", 
@@ -288,13 +305,11 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
     )
     await state.set_state(Registration.waiting_for_receipt_photo)
 
-# Заглушка, якщо юзер пише текст замість кнопок перевірки
 @dp.message(Registration.waiting_for_subscription)
 async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
-
-# --- ПРИЙОМ ФОТО ---
+# --- ОНОВЛЕНО: ДОДАЄМО ЧЕК В БАЗУ ВИКОРИСТАНИХ ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -307,6 +322,10 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
+    # ЗАПИСУЄМО ЧЕК В БАЗУ, ЩОБ БІЛЬШЕ НЕ ПРИЙМАТИ
+    if receipt_number_text != "Не вказано":
+        await redis.sadd("used_receipts", receipt_number_text)
+    
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
@@ -314,7 +333,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
 
-    # Відправка адмінам
     admin_caption = (
         f"🆕 <b>Новий чек! (У клієнта чеків: {new_count})</b>\n\n"
         f"🧾 <b>Номер чека:</b> {receipt_number_text}\n\n"
@@ -329,7 +347,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     except Exception as e:
         logging.error(f"Помилка відправки в групу: {e}")
 
-    # Відправка в Google
     if GOOGLE_WEBHOOK_URL:
         google_data = {
             "fio": fio,
@@ -342,11 +359,9 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.post(GOOGLE_WEBHOOK_URL, json=google_data) as response:
-                    if response.status != 200:
-                        error_text = await response.text()
-                        await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Помилка Google Таблиці! Статус: {response.status}\nТекст: {error_text}")
-        except Exception as e:
-            pass # Ігноруємо дрібні помилки підключення для юзера
+                    pass 
+        except Exception:
+            pass 
 
     await message.answer(
         f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші!", 
