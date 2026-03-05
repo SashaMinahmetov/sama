@@ -42,7 +42,7 @@ class Registration(StatesGroup):
     waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
 
-# --- КЛАВІАТУРИ (ОНОВЛЕНО: Додано кнопку FAQ) ---
+# --- КЛАВІАТУРИ ---
 def get_main_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
@@ -87,7 +87,7 @@ async def process_show_cabinet(target_message, user_id: int):
         f"🔸 <b>ПІБ:</b> {fio}\n"
         f"🔸 <b>Телефон:</b> {phone}\n"
         f"🔸 <b>Instagram:</b> {ig}\n"
-        f"🎫 <b>Зареєстровано чеків:</b> {receipts_count}\n\n"
+        f"🎫 <b>Успішно схвалено чеків:</b> {receipts_count}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
     await target_message.answer(cabinet_text, parse_mode="HTML")
@@ -141,7 +141,7 @@ async def cmd_stats(message: types.Message):
     stats_text = (
         "📊 <b>Статистика розіграшу:</b>\n\n"
         f"👤 Усього учасників: <b>{users_count}</b>\n"
-        f"🧾 Унікальних чеків: <b>{unique_receipts}</b>"
+        f"🧾 Чеків на модерації та схвалених: <b>{unique_receipts}</b>"
     )
     await message.answer(stats_text, parse_mode="HTML")
 
@@ -176,14 +176,13 @@ async def show_rules(message: types.Message):
     )
     await message.answer(rules, parse_mode="HTML")
 
-# --- НОВИЙ ОБРОБНИК: FAQ та Призи ---
 @dp.message(F.text == "🏆 Призи та FAQ")
 async def show_faq(message: types.Message):
     faq_text = (
         "🏆 <b>Призовий фонд та Часті запитання:</b>\n\n"
         "🎁 <b>Що можна виграти?</b>\n"
-        "• Головний приз: <b>[Напиши тут головний приз, наприклад: iPhone 15]</b>\n"
-        "• Щотижневі призи: <b>[Напиши тут інші призи, наприклад: Бокси з продукцією]</b>\n\n"
+        "• Головний приз: <b>[Напиши тут головний приз]</b>\n"
+        "• Щотижневі призи: <b>[Напиши тут інші призи]</b>\n\n"
         "📅 <b>Коли відбудеться розіграш?</b>\n"
         "Розіграш відбудеться <b>[Вкажи дату]</b> у прямому ефірі на нашій сторінці в Instagram.\n\n"
         "❓ <b>Скільки чеків можна завантажити?</b>\n"
@@ -241,11 +240,16 @@ async def process_phone(message: types.Message, state: FSMContext):
 async def process_receipt_number(message: types.Message, state: FSMContext):
     receipt_num = message.text.strip().upper() 
     
+    # Захист від занадто довгих повідомлень (щоб кнопки працювали)
+    if len(receipt_num) > 30:
+        await message.answer("⚠️ Номер чека занадто довгий. Будь ласка, перевірте та введіть коректний номер:", reply_markup=get_cancel_kb())
+        return
+
     is_used = await redis.sismember("used_receipts", receipt_num)
     if is_used:
         await message.answer(
-            "⚠️ <b>Помилка!</b> Чек з таким номером вже був зареєстрований у системі.\n"
-            "Спробуйте ввести інший номер або перевірте правильність вводу:",
+            "⚠️ <b>Помилка!</b> Чек з таким номером вже був зареєстрований або зараз на модерації.\n"
+            "Спробуйте ввести інший номер:",
             parse_mode="HTML",
             reply_markup=get_cancel_kb()
         )
@@ -320,7 +324,7 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
     
     await call.message.edit_text(
         "✅ <b>Всі підписки успішно підтверджено!</b> 🎉\n\n"
-        "📸 Тепер відправте <b>ФОТО вашого чека</b> для завершення реєстрації:", 
+        "📸 Тепер відправте <b>ФОТО вашого чека</b> для відправки на модерацію:", 
         parse_mode="HTML"
     )
     await state.set_state(Registration.waiting_for_receipt_photo)
@@ -329,6 +333,7 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
 async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
+# --- ВІДПРАВКА НА МОДЕРАЦІЮ АДМІНІСТРАТОРУ ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -341,48 +346,49 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
+    # Блокуємо номер чека відразу
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
     
+    # Додаємо тимчасово кількість чеків
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
 
     photo_id = message.photo[-1].file_id
     username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
+    
+    # Зберігаємо TG username на майбутнє
+    await redis.hset(f"user:{user_id}", "tg_username", username)
 
     admin_caption = (
-        f"🆕 <b>Новий чек! (У клієнта чеків: {new_count})</b>\n\n"
+        f"🆕 <b>Новий чек на модерацію!</b>\n\n"
         f"🧾 <b>Номер чека:</b> {receipt_number_text}\n\n"
         f"👤 <b>ПІБ:</b> {fio}\n"
         f"📱 <b>Телефон:</b> {phone}\n"
         f"📸 <b>Instagram:</b> {ig}\n"
-        f"💬 <b>TG Юзернейм:</b> {username}"
+        f"💬 <b>TG Юзернейм:</b> {username}\n"
+        f"🎫 <b>Поточний лічильник чеків юзера:</b> {new_count}"
+    )
+    
+    # КЛАВІАТУРА МОДЕРАЦІЇ (передаємо дані через callback)
+    admin_kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Прийняти", callback_data=f"approve_{user_id}_{receipt_number_text}_{new_count}"),
+                InlineKeyboardButton(text="❌ Відхилити", callback_data=f"reject_{user_id}_{receipt_number_text}")
+            ]
+        ]
     )
     
     try:
-        await bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=admin_caption, parse_mode="HTML")
+        await bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=admin_caption, reply_markup=admin_kb, parse_mode="HTML")
     except Exception as e:
         logging.error(f"Помилка відправки в групу: {e}")
 
-    if GOOGLE_WEBHOOK_URL:
-        google_data = {
-            "fio": fio,
-            "phone": phone,
-            "tg_username": username,
-            "ig_username": ig,
-            "receipt_count": new_count,
-            "receipt_number": receipt_number_text
-        }
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(GOOGLE_WEBHOOK_URL, json=google_data) as response:
-                    pass 
-        except Exception:
-            pass 
-
     await message.answer(
-        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь у розіграші!", 
+        f"⏳ <b>Фото отримано!</b>\n\nВаш чек №{receipt_number_text} відправлено на модерацію адміністратору.\n"
+        "Ми повідомимо вас про результат перевірки!", 
         reply_markup=get_main_reply_kb(),
         parse_mode="HTML"
     )
@@ -391,6 +397,87 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
 @dp.message(Registration.waiting_for_receipt_photo, F.text)
 async def error_receipt_format(message: types.Message):
     await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸", parse_mode="HTML")
+
+
+# --- ОБРОБНИКИ КНОПОК МОДЕРАЦІЇ ---
+
+@dp.callback_query(F.data.startswith("approve_"))
+async def admin_approve(call: CallbackQuery):
+    parts = call.data.split("_")
+    user_id = int(parts[1])
+    receipt_number = parts[2]
+    new_count = parts[3]
+    
+    user_data = await redis.hgetall(f"user:{user_id}")
+    fio = user_data.get(b'fio', b'').decode('utf-8')
+    phone = user_data.get(b'phone', b'').decode('utf-8')
+    ig = user_data.get(b'ig', b'').decode('utf-8')
+    tg_username = user_data.get(b'tg_username', b'Немає').decode('utf-8')
+    
+    # 1. Тільки зараз відправляємо в Google Таблицю!
+    if GOOGLE_WEBHOOK_URL:
+        google_data = {
+            "fio": fio,
+            "phone": phone,
+            "tg_username": tg_username,
+            "ig_username": ig,
+            "receipt_count": new_count,
+            "receipt_number": receipt_number
+        }
+        try:
+            async with aiohttp.ClientSession() as session:
+                await session.post(GOOGLE_WEBHOOK_URL, json=google_data)
+        except Exception:
+            pass 
+            
+    # 2. Відправляємо повідомлення щасливому клієнту
+    try:
+        await bot.send_message(
+            chat_id=user_id, 
+            text=f"🎉 <b>Вітаємо!</b> Ваш чек №{receipt_number} перевірено та <b>СХВАЛЕНО</b> модератором!\nТепер він офіційно бере участь у розіграші 🍀", 
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+        
+    # 3. Змінюємо текст у адмін-групі та ховаємо кнопки
+    await call.message.edit_caption(
+        caption=call.message.caption + f"\n\n✅ <b>СХВАЛЕНО МОДЕРАТОРОМ:</b> @{call.from_user.username}", 
+        parse_mode="HTML", 
+        reply_markup=None
+    )
+    await call.answer("Чек успішно схвалено!")
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def admin_reject(call: CallbackQuery):
+    parts = call.data.split("_")
+    user_id = int(parts[1])
+    receipt_number = parts[2]
+    
+    # 1. Звільняємо номер чека, щоб клієнт міг спробувати ще раз
+    await redis.srem("used_receipts", receipt_number)
+    
+    # 2. Віднімаємо чек із загальної кількості юзера
+    await redis.hincrby(f"user:{user_id}", "receipts", -1)
+    
+    # 3. Повідомлення клієнту
+    try:
+        await bot.send_message(
+            chat_id=user_id, 
+            text=f"⚠️ <b>Увага!</b> Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.\nМожливо, фото нечітке або чек не відповідає умовам.\nВи можете завантажити його правильно ще раз.", 
+            parse_mode="HTML"
+        )
+    except Exception:
+        pass
+        
+    # 4. Змінюємо текст у адмін-групі
+    await call.message.edit_caption(
+        caption=call.message.caption + f"\n\n❌ <b>ВІДХИЛЕНО МОДЕРАТОРОМ:</b> @{call.from_user.username}", 
+        parse_mode="HTML", 
+        reply_markup=None
+    )
+    await call.answer("Чек відхилено!")
+
 
 # --- WEBHOOK ---
 @app.get("/")
