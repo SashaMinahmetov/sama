@@ -42,12 +42,12 @@ class Registration(StatesGroup):
     waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
 
-# --- КЛАВІАТУРИ ---
+# --- КЛАВІАТУРИ (ОНОВЛЕНО: Додано кнопку FAQ) ---
 def get_main_reply_kb():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="🧾 Завантажити чек"), KeyboardButton(text="👤 Мій кабінет")],
-            [KeyboardButton(text="🎁 Умови розіграшу")]
+            [KeyboardButton(text="🎁 Умови розіграшу"), KeyboardButton(text="🏆 Призи та FAQ")]
         ],
         resize_keyboard=True
     )
@@ -124,17 +124,12 @@ async def cmd_start(message: types.Message, state: FSMContext):
     )
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
-# --- СЕКРЕТНАЯ КОМАНДА: ОЧИСТКА БАЗЫ ДАННЫХ ---
 @dp.message(Command("cleardb"))
 async def cmd_cleardb(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
-    
-    # Очищаем всю базу данных Redis
     await redis.flushdb()
-    
     await message.answer("🧹 <b>База даних ПОВНІСТЮ ОЧИЩЕНА!</b>\n\nВсі користувачі, їхні профілі та використані номери чеків видалені. Бот готовий до реального запуску.", parse_mode="HTML")
 
-# --- КОМАНДА: СТАТИСТИКА (/stats) ---
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
@@ -174,12 +169,29 @@ async def show_rules(message: types.Message):
     rules = (
         "📜 <b>Умови дуже прості:</b>\n\n"
         "1️⃣ Бути підписаним на наші 2 сторінки в Instagram.\n"
-        "2️⃣ Купувати нашу продукцію.\n"
+        "2️⃣ Купувати нашу акційну продукцію.\n"
         "3️⃣ Натискати «Завантажити чек» у цьому боті.\n"
         "4️⃣ Вводити номер чека та надсилати його фото.\n\n"
         "Більше чеків — більше шансів на перемогу! 🍀"
     )
     await message.answer(rules, parse_mode="HTML")
+
+# --- НОВИЙ ОБРОБНИК: FAQ та Призи ---
+@dp.message(F.text == "🏆 Призи та FAQ")
+async def show_faq(message: types.Message):
+    faq_text = (
+        "🏆 <b>Призовий фонд та Часті запитання:</b>\n\n"
+        "🎁 <b>Що можна виграти?</b>\n"
+        "• Головний приз: <b>[Напиши тут головний приз, наприклад: iPhone 15]</b>\n"
+        "• Щотижневі призи: <b>[Напиши тут інші призи, наприклад: Бокси з продукцією]</b>\n\n"
+        "📅 <b>Коли відбудеться розіграш?</b>\n"
+        "Розіграш відбудеться <b>[Вкажи дату]</b> у прямому ефірі на нашій сторінці в Instagram.\n\n"
+        "❓ <b>Скільки чеків можна завантажити?</b>\n"
+        "Необмежену кількість! Більше унікальних чеків — більше шансів на перемогу.\n\n"
+        "❓ <b>Чи потрібно зберігати паперовий чек?</b>\n"
+        "Так, <b>ОБОВ'ЯЗКОВО</b> зберігайте оригінал чека до кінця розіграшу. Без нього отримати приз буде неможливо!"
+    )
+    await message.answer(faq_text, parse_mode="HTML")
 
 @dp.message(F.text == "👤 Мій кабінет")
 async def show_cabinet_msg(message: types.Message):
