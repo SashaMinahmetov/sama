@@ -10,7 +10,7 @@ from aiogram.fsm.storage.redis import RedisStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import (
-    ReplyKeyboardRemove,
+    ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove,
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
 from redis.asyncio import Redis
@@ -43,7 +43,7 @@ class Registration(StatesGroup):
     waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
 
-# --- КЛАВІАТУРИ (ТІЛЬКИ INLINE) ---
+# --- КЛАВІАТУРИ (МАКСИМАЛЬНО ЧИСТІ) ---
 
 # Головне меню
 def get_inline_start_kb():
@@ -72,28 +72,30 @@ def get_back_to_main_inline_kb():
         ]
     )
 
-# Скасування дії
-def get_inline_cancel_kb():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")]]
-    )
-
-# Назад і Скасувати
-def get_inline_back_cancel_kb():
+# Тільки кнопка Назад (замінила купу кнопок "Скасувати")
+def get_inline_back_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action"),
-                InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")
-            ]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
         ]
+    )
+
+# СПЕЦІАЛЬНА НИЖНЯ ПАНЕЛЬ (Тільки для запиту номера)
+def get_phone_reply_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Поділитися номером", request_contact=True)],
+            [KeyboardButton(text="⬅️ Назад")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
     )
 
 # --- СПІЛЬНА ЛОГІКА ---
 async def show_main_menu(target_message: types.Message, state: FSMContext):
     await state.set_state(None)
     
-    # Примусово прибираємо старі нижні клавіатури, якщо вони залишились у користувача
+    # Прибираємо нижню клавіатуру, якщо вона десь залишилася
     rm_msg = await target_message.answer("🔄 Завантаження...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
@@ -150,14 +152,14 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
     if not user_data or b'ig' not in user_data:
         await target_message.answer(
             "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
-            reply_markup=get_inline_cancel_kb(),
+            reply_markup=get_inline_back_kb(),
             parse_mode="HTML"
         )
         await state.set_state(Registration.waiting_for_fio)
     else:
         await target_message.answer(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-            reply_markup=get_inline_cancel_kb(),
+            reply_markup=get_inline_back_kb(),
             parse_mode="HTML"
         )
         await state.set_state(Registration.waiting_for_receipt_number)
@@ -236,12 +238,6 @@ async def cmd_sendall(message: types.Message):
 
 # --- ОБРОБНИКИ INLINE-НАВІГАЦІЇ (КНОПКИ В ЧАТІ) ---
 
-@dp.callback_query(F.data == "cancel_action")
-async def cancel_action_call(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await call.message.delete()
-    await show_main_menu(call.message, state)
-
 @dp.callback_query(F.data == "back_action")
 async def back_action_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
@@ -251,30 +247,42 @@ async def back_action_call(call: CallbackQuery, state: FSMContext):
         await state.set_state(Registration.waiting_for_receipt_number)
         await call.message.edit_text(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-            reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML"
+            reply_markup=get_inline_back_kb(), parse_mode="HTML"
         )
     elif current_state == Registration.waiting_for_ig.state:
         await state.set_state(Registration.waiting_for_receipt_number)
         await call.message.edit_text(
             "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-            reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML"
+            reply_markup=get_inline_back_kb(), parse_mode="HTML"
+        )
+    elif current_state == Registration.waiting_for_subscription.state:
+        await state.set_state(Registration.waiting_for_ig)
+        await call.message.edit_text(
+            "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
+            "<i>Це потрібно для перевірки виконання умов розіграшу.</i>", 
+            reply_markup=get_inline_back_kb(), parse_mode="HTML"
         )
     elif current_state == Registration.waiting_for_receipt_number.state:
         user_data = await redis.hgetall(f"user:{call.from_user.id}")
         if not user_data or b'ig' not in user_data:
             await state.set_state(Registration.waiting_for_phone)
-            await call.message.edit_text(
-                "📱 Напишіть ваш номер телефону (наприклад: 095 123 45 67):", 
-                reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML"
+            await call.message.delete()
+            # Повертаємо тимчасову нижню клавіатуру для телефону
+            await call.message.answer(
+                "📱 Натисніть кнопку <b>«📱 Поділитися номером»</b> внизу екрана або введіть його вручну:", 
+                reply_markup=get_phone_reply_kb(), parse_mode="HTML"
             )
         else:
             await call.message.delete()
             await show_main_menu(call.message, state)
     elif current_state == Registration.waiting_for_phone.state:
         await state.set_state(Registration.waiting_for_fio)
-        await call.message.edit_text(
+        # Прибираємо нижню клавіатуру телефону
+        rm_msg = await call.message.answer("🔄...", reply_markup=ReplyKeyboardRemove())
+        await rm_msg.delete()
+        await call.message.answer(
             "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
-            reply_markup=get_inline_cancel_kb(), parse_mode="HTML"
+            reply_markup=get_inline_back_kb(), parse_mode="HTML"
         )
     else:
         await call.message.delete()
@@ -312,25 +320,50 @@ async def start_upload_call(call: CallbackQuery, state: FSMContext):
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Будь ласка, введіть ПІБ текстом:", reply_markup=get_inline_cancel_kb())
+        await message.answer("⚠️ Будь ласка, введіть ПІБ текстом:", reply_markup=get_inline_back_kb())
         return
     await state.update_data(fio=message.text)
+    
+    # Викликаємо тимчасову нижню клавіатуру для телефону
     await message.answer(
-        "Чудово! Тепер напишіть ваш номер телефону (наприклад: 095 123 45 67):", 
-        reply_markup=get_inline_back_cancel_kb()
+        "Чудово! Натисніть кнопку <b>«📱 Поділитися номером»</b> внизу екрана або напишіть його вручну:", 
+        reply_markup=get_phone_reply_kb(),
+        parse_mode="HTML"
     )
     await state.set_state(Registration.waiting_for_phone)
 
 @dp.message(Registration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
-    if not message.text:
-        await message.answer("⚠️ Будь ласка, введіть номер телефону текстом:", reply_markup=get_inline_back_cancel_kb())
+    # Обробка натискання кнопки "Назад" на нижній клавіатурі
+    if message.text == "⬅️ Назад":
+        rm_msg = await message.answer("🔄 Повертаємось...", reply_markup=ReplyKeyboardRemove())
+        await rm_msg.delete()
+        await message.answer(
+            "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
+            reply_markup=get_inline_back_kb(), parse_mode="HTML"
+        )
+        await state.set_state(Registration.waiting_for_fio)
         return
-    await state.update_data(phone=message.text)
+
+    # Отримуємо номер з контакту АБО тексту
+    phone = ""
+    if message.contact:
+        phone = message.contact.phone_number
+    elif message.text:
+        phone = message.text
+    else:
+        await message.answer("⚠️ Будь ласка, надішліть контакт або введіть номер текстом:", reply_markup=get_phone_reply_kb())
+        return
+
+    await state.update_data(phone=phone)
+    
+    # ХОВАЄМО НИЖНЮ ПАНЕЛЬ НАЗАВЖДИ
+    rm_msg = await message.answer("🔄 Зберігаємо...", reply_markup=ReplyKeyboardRemove())
+    await rm_msg.delete()
     
     await message.answer(
         "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
-        reply_markup=get_inline_back_cancel_kb(),
+        reply_markup=get_inline_back_kb(),
         parse_mode="HTML"
     )
     await state.set_state(Registration.waiting_for_receipt_number)
@@ -338,19 +371,19 @@ async def process_phone(message: types.Message, state: FSMContext):
 @dp.message(Registration.waiting_for_receipt_number)
 async def process_receipt_number(message: types.Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Будь ласка, введіть номер чека текстом:", reply_markup=get_inline_back_cancel_kb())
+        await message.answer("⚠️ Будь ласка, введіть номер чека текстом:", reply_markup=get_inline_back_kb())
         return
     receipt_num = message.text.strip().upper() 
     
     if len(receipt_num) > 30:
-        await message.answer("⚠️ Номер чека занадто довгий. Перевірте та введіть коректний номер:", reply_markup=get_inline_back_cancel_kb())
+        await message.answer("⚠️ Номер чека занадто довгий. Перевірте та введіть коректний номер:", reply_markup=get_inline_back_kb())
         return
 
     is_used = await redis.sismember("used_receipts", receipt_num)
     if is_used:
         await message.answer(
             "⚠️ <b>Помилка!</b> Чек з таким номером вже був зареєстрований у системі.\nСпробуйте ввести інший номер:",
-            parse_mode="HTML", reply_markup=get_inline_back_cancel_kb()
+            parse_mode="HTML", reply_markup=get_inline_back_kb()
         )
         return 
         
@@ -364,7 +397,7 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
         if is_sub_checked:
             await message.answer(
                 "📸 Тепер відправте <b>ФОТО вашого чека</b>:", 
-                reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML"
+                reply_markup=get_inline_back_kb(), parse_mode="HTML"
             )
             await state.set_state(Registration.waiting_for_receipt_photo)
         else:
@@ -373,14 +406,14 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
         await message.answer(
             "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
             "<i>Це потрібно для перевірки виконання умов розіграшу.</i>", 
-            reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML"
+            reply_markup=get_inline_back_kb(), parse_mode="HTML"
         )
         await state.set_state(Registration.waiting_for_ig)
 
 @dp.message(Registration.waiting_for_ig)
 async def process_ig(message: types.Message, state: FSMContext):
     if not message.text:
-        await message.answer("⚠️ Будь ласка, введіть нікнейм текстом:", reply_markup=get_inline_back_cancel_kb())
+        await message.answer("⚠️ Будь ласка, введіть нікнейм текстом:", reply_markup=get_inline_back_kb())
         return
     ig = message.text
     fsm_data = await state.get_data()
@@ -396,7 +429,7 @@ async def send_subscription_step_1(message: types.Message, state: FSMContext):
         inline_keyboard=[
             [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
             [InlineKeyboardButton(text="🔄 Перевірити підписку 1", callback_data="check_sub_1")],
-            [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
         ]
     )
     text = (
@@ -417,7 +450,7 @@ async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
         inline_keyboard=[
             [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
             [InlineKeyboardButton(text="🔄 Перевірити підписку 2", callback_data="check_sub_2")],
-            [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_action")]
+            [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
         ]
     )
     text = (
@@ -438,7 +471,7 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
     await call.message.edit_text("✅ <b>Всі підписки успішно підтверджено!</b> 🎉", parse_mode="HTML")
     await call.message.answer(
         "📸 Тепер відправте <b>ФОТО вашого чека</b> для реєстрації:", 
-        reply_markup=get_inline_back_cancel_kb(), parse_mode="HTML"
+        reply_markup=get_inline_back_kb(), parse_mode="HTML"
     )
     await state.set_state(Registration.waiting_for_receipt_photo)
 
@@ -520,7 +553,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
 
 @dp.message(Registration.waiting_for_receipt_photo)
 async def error_receipt_format(message: types.Message):
-    await message.answer("⚠️ Будь ласка, відправте саме <b>ФОТО</b> чека 📸 (документи або текст не приймаються).", parse_mode="HTML", reply_markup=get_inline_back_cancel_kb())
+    await message.answer("⚠️ Будь ласка, відправте саме <b>ФОТО</b> чека 📸 (документи або текст не приймаються).", parse_mode="HTML", reply_markup=get_inline_back_kb())
 
 # --- ОБРОБНИКИ КНОПОК МОДЕРАЦІЇ ---
 
