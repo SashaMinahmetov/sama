@@ -43,19 +43,10 @@ class Registration(StatesGroup):
     waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
 
+
 # --- КЛАВІАТУРИ ---
 
-# Запасна нижня панель
-def get_main_reply_kb():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="🧾 Завантажити чек"), KeyboardButton(text="👤 Мій кабінет")],
-            [KeyboardButton(text="🎁 Умови розіграшу"), KeyboardButton(text="🏆 Призи та FAQ")]
-        ],
-        resize_keyboard=True
-    )
-
-# ГОЛОВНІ ЕКРАННІ КНОПКИ (ПІД ТЕКСТОМ)
+# ГОЛОВНІ ЕКРАННІ КНОПКИ (ПІД ТЕКСТОМ) + ІНСТАГРАМ
 def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -66,16 +57,27 @@ def get_inline_start_kb():
             [
                 InlineKeyboardButton(text="🎁 Умови розіграшу", callback_data="show_rules"),
                 InlineKeyboardButton(text="🏆 Призи та FAQ", callback_data="show_faq")
+            ],
+            [
+                InlineKeyboardButton(text="📸 tm.sama.ua", url=INSTAGRAM_LINK_1),
+                InlineKeyboardButton(text="📸 koshik_shop_", url=INSTAGRAM_LINK_2)
             ]
         ]
     )
 
-# ЕКРАННА КНОПКА ПОВЕРНЕННЯ В МЕНЮ (ДЛЯ ЗРУЧНОСТІ)
+# ЕКРАННА КНОПКА ПОВЕРНЕННЯ В МЕНЮ
 def get_back_to_main_inline_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="🏠 В головне меню", callback_data="back_to_main")]
         ]
+    )
+
+# ТИМЧАСОВІ НИЖНІ КНОПКИ ДЛЯ ЗРУЧНОСТІ ПРИ ВВОДІ ДАНИХ (ПІД ЧАС РЕЄСТРАЦІЇ)
+def get_cancel_kb():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Скасувати")]],
+        resize_keyboard=True
     )
 
 def get_back_cancel_kb():
@@ -124,7 +126,6 @@ async def process_show_cabinet(target_message, user_id: int):
         f"{history_text}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
-    # ДОДАЄМО ЕКРАННУ КНОПКУ ПОВЕРНЕННЯ НАЗАД
     await target_message.answer(cabinet_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 async def process_start_upload(target_message, user_id: int, state: FSMContext):
@@ -154,7 +155,6 @@ async def process_show_rules(target_message):
         "4️⃣ Вводити номер чека та надсилати його фото.\n\n"
         "Більше чеків — більше шансів на перемогу! 🍀"
     )
-    # ДОДАЄМО ЕКРАННУ КНОПКУ ПОВЕРНЕННЯ НАЗАД
     await target_message.answer(rules, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 async def process_show_faq(target_message):
@@ -170,22 +170,26 @@ async def process_show_faq(target_message):
         "❓ <b>Чи потрібно зберігати паперовий чек?</b>\n"
         "Так, <b>ОБОВ'ЯЗКОВО</b> зберігайте оригінал чека до кінця розіграшу. Без нього отримати приз буде неможливо!"
     )
-    # ДОДАЄМО ЕКРАННУ КНОПКУ ПОВЕРНЕННЯ НАЗАД
     await target_message.answer(faq_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
+
 # --- ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ---
+
 @dp.message(Command("start"))
 @dp.message(F.text == "❌ Скасувати")
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.set_state(None) 
-    await message.answer("Головне меню відкрито 👇", reply_markup=get_main_reply_kb())
+    
+    # Примусово прибираємо будь-які старі нижні клавіатури
+    rm_msg = await message.answer("🔄 Оновлення меню...", reply_markup=ReplyKeyboardRemove())
+    await rm_msg.delete()
+    
     welcome_text = (
         "👋 <b>Вітаємо у нашому святковому розіграші!</b> 🎉\n\n"
         "Тут ви можете реєструвати чеки за покупку нашої продукції та вигравати неймовірні призи! 🎁\n\n"
         "⚠️ <b>Обов'язкова умова:</b> підписка на наші дві Instagram сторінки!\n\n"
         "Оберіть потрібний розділ нижче 👇"
     )
-    # ОСЬ ТУТ ВСТАВЛЯЮТЬСЯ ЕКРАННІ КНОПКИ ПІД ТЕКСТОМ
     await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
 @dp.message(Command("cleardb"))
@@ -258,43 +262,45 @@ async def back_to_main_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await cmd_start(call.message, state)
 
-# ОБРОБНИКИ ДЛЯ УМОВ ТА FAQ
+
+# ОБРОБНИКИ КНОПОК ЗІ СТАРИХ ТЕКСТОВИХ КОМАНД (Залишені про всяк випадок)
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules_msg(message: types.Message):
     await process_show_rules(message)
 
+@dp.message(F.text == "🏆 Призи та FAQ")
+async def show_faq_msg(message: types.Message):
+    await process_show_faq(message)
+
+@dp.message(F.text == "👤 Мій кабінет")
+async def show_cabinet_msg(message: types.Message):
+    await process_show_cabinet(message, message.from_user.id)
+
+@dp.message(F.text == "🧾 Завантажити чек")
+async def start_upload_msg(message: types.Message, state: FSMContext):
+    await process_start_upload(message, message.from_user.id, state)
+
+# ОБРОБНИКИ ДЛЯ INLINE КНОПОК МЕНЮ
 @dp.callback_query(F.data == "show_rules")
 async def show_rules_call(call: CallbackQuery):
     await call.answer()
     await process_show_rules(call.message)
-
-@dp.message(F.text == "🏆 Призи та FAQ")
-async def show_faq_msg(message: types.Message):
-    await process_show_faq(message)
 
 @dp.callback_query(F.data == "show_faq")
 async def show_faq_call(call: CallbackQuery):
     await call.answer()
     await process_show_faq(call.message)
 
-# ОБРОБНИКИ КАБІНЕТУ ТА ЗАВАНТАЖЕННЯ ЧЕКА
-@dp.message(F.text == "👤 Мій кабінет")
-async def show_cabinet_msg(message: types.Message):
-    await process_show_cabinet(message, message.from_user.id)
-
 @dp.callback_query(F.data == "my_cabinet")
 async def show_cabinet_call(call: CallbackQuery):
     await call.answer() 
     await process_show_cabinet(call.message, call.from_user.id)
 
-@dp.message(F.text == "🧾 Завантажити чек")
-async def start_upload_msg(message: types.Message, state: FSMContext):
-    await process_start_upload(message, message.from_user.id, state)
-
 @dp.callback_query(F.data == "upload_receipt")
 async def start_upload_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await process_start_upload(call.message, call.from_user.id, state)
+
 
 # --- ВОРОНКА РЕЄСТРАЦІЇ ---
 @dp.message(Registration.waiting_for_fio)
@@ -435,6 +441,7 @@ async def process_check_sub_2(call: CallbackQuery, state: FSMContext):
 async def force_click_check(message: types.Message):
     await message.answer("⚠️ Будь ласка, натисніть кнопку <b>«🔄 Перевірити підписку»</b> у повідомленні вище.", parse_mode="HTML")
 
+
 # --- ПРИЙОМ ФОТО: МОМЕНТАЛЬНЕ ПОВІДОМЛЕННЯ + ЗАПИС ІСТОРІЇ ---
 @dp.message(Registration.waiting_for_receipt_photo, F.photo)
 async def process_receipt_photo(message: types.Message, state: FSMContext):
@@ -460,7 +467,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     new_count = new_count.decode('utf-8')
     await redis.hset(f"user:{user_id}", "tg_username", tg_username)
 
-    # Прибираємо нижню клавіатуру, щоб не заважала
     rm_msg = await message.answer("🔄 Обробка...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
@@ -549,7 +555,7 @@ async def admin_reject(call: CallbackQuery):
     try:
         await bot.send_message(
             chat_id=user_id, 
-            text=f"⚠️ <b>Увага!</b> Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.\nМожливо, фото нечітке, обрізане або чек не відповідає умовам.\n\nБудь ласка, завантажте цей чек правильно ще раз через меню «🧾 Завантажити чек».", 
+            text=f"⚠️ <b>Увага!</b> Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.\nМожливо, фото нечітке, обрізане або чек не відповідає умовам.\n\nБудь ласка, завантажте цей чек правильно ще раз.", 
             parse_mode="HTML",
             reply_markup=get_back_to_main_inline_kb()
         )
