@@ -240,7 +240,6 @@ async def process_phone(message: types.Message, state: FSMContext):
 async def process_receipt_number(message: types.Message, state: FSMContext):
     receipt_num = message.text.strip().upper() 
     
-    # Захист від занадто довгих повідомлень (щоб кнопки працювали)
     if len(receipt_num) > 30:
         await message.answer("⚠️ Номер чека занадто довгий. Будь ласка, перевірте та введіть коректний номер:", reply_markup=get_cancel_kb())
         return
@@ -346,11 +345,9 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     fsm_data = await state.get_data()
     receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
     
-    # Блокуємо номер чека відразу
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
     
-    # Додаємо тимчасово кількість чеків
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
@@ -358,7 +355,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     photo_id = message.photo[-1].file_id
     username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
     
-    # Зберігаємо TG username на майбутнє
     await redis.hset(f"user:{user_id}", "tg_username", username)
 
     admin_caption = (
@@ -371,7 +367,6 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         f"🎫 <b>Поточний лічильник чеків юзера:</b> {new_count}"
     )
     
-    # КЛАВІАТУРА МОДЕРАЦІЇ (передаємо дані через callback)
     admin_kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -394,9 +389,9 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     )
     await state.set_state(None)
 
-@dp.message(Registration.waiting_for_receipt_photo, F.text)
+@dp.message(Registration.waiting_for_receipt_photo)
 async def error_receipt_format(message: types.Message):
-    await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸", parse_mode="HTML")
+    await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸 (документи або текст не приймаються).", parse_mode="HTML")
 
 
 # --- ОБРОБНИКИ КНОПОК МОДЕРАЦІЇ ---
@@ -414,7 +409,6 @@ async def admin_approve(call: CallbackQuery):
     ig = user_data.get(b'ig', b'').decode('utf-8')
     tg_username = user_data.get(b'tg_username', b'Немає').decode('utf-8')
     
-    # 1. Тільки зараз відправляємо в Google Таблицю!
     if GOOGLE_WEBHOOK_URL:
         google_data = {
             "fio": fio,
@@ -430,7 +424,6 @@ async def admin_approve(call: CallbackQuery):
         except Exception:
             pass 
             
-    # 2. Відправляємо повідомлення щасливому клієнту
     try:
         await bot.send_message(
             chat_id=user_id, 
@@ -440,9 +433,12 @@ async def admin_approve(call: CallbackQuery):
     except Exception:
         pass
         
-    # 3. Змінюємо текст у адмін-групі та ховаємо кнопки
+    # Надійне форматування тексту, щоб не злітало HTML (захист від крашу)
+    original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
+    admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
+
     await call.message.edit_caption(
-        caption=call.message.caption + f"\n\n✅ <b>СХВАЛЕНО МОДЕРАТОРОМ:</b> @{call.from_user.username}", 
+        caption=original_caption + f"\n\n✅ <b>СХВАЛЕНО:</b> {admin_name}", 
         parse_mode="HTML", 
         reply_markup=None
     )
@@ -454,13 +450,9 @@ async def admin_reject(call: CallbackQuery):
     user_id = int(parts[1])
     receipt_number = parts[2]
     
-    # 1. Звільняємо номер чека, щоб клієнт міг спробувати ще раз
     await redis.srem("used_receipts", receipt_number)
-    
-    # 2. Віднімаємо чек із загальної кількості юзера
     await redis.hincrby(f"user:{user_id}", "receipts", -1)
     
-    # 3. Повідомлення клієнту
     try:
         await bot.send_message(
             chat_id=user_id, 
@@ -470,9 +462,11 @@ async def admin_reject(call: CallbackQuery):
     except Exception:
         pass
         
-    # 4. Змінюємо текст у адмін-групі
+    original_caption = call.message.html_text if call.message.html_text else (call.message.caption or "Чек")
+    admin_name = f"@{call.from_user.username}" if call.from_user.username else call.from_user.first_name
+
     await call.message.edit_caption(
-        caption=call.message.caption + f"\n\n❌ <b>ВІДХИЛЕНО МОДЕРАТОРОМ:</b> @{call.from_user.username}", 
+        caption=original_caption + f"\n\n❌ <b>ВІДХИЛЕНО:</b> {admin_name}", 
         parse_mode="HTML", 
         reply_markup=None
     )
