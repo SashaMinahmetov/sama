@@ -1,9 +1,6 @@
 import os
 import logging
 import aiohttp
-import asyncio
-import base64
-import json
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -15,49 +12,33 @@ from aiogram.types import (
     InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 )
 from redis.asyncio import Redis
-from io import BytesIO
 
-# --- НАЛАШТУВАННЯ ---
+# --- НАСТРОЙКИ ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
-GOOGLE_AI_KEY = os.environ.get("GOOGLE_AI_KEY") 
 ADMIN_ID = "-1003731208847" 
-INSTAGRAM_LINK = "https://instagram.com/vash_account"
+INSTAGRAM_LINK_1 = "https://instagram.com/vasia_pupkin" # Замени на 1 страницу
+INSTAGRAM_LINK_2 = "https://instagram.com/vasia_pupkin2" # Замени на 2 страницу
 
-# --- СПИСОК ТОВАРІВ ---
-PROMO_PRODUCTS_LIST = [
-    "ЛЮБИСТОК", "ТОРЧИН", "RIO", "MOLENDAM", "МОЛЕНДАМ", 
-    "КЕТЧУП", "АНАНАСИ", "ШАМПІНЬЙОНИ", "ПРИПРАВА"
-]
-PROMO_PRODUCTS_STR = ", ".join(PROMO_PRODUCTS_LIST)
-
-# --- СПИСОК МОДЕЛЕЙ (ОНОВЛЕНИЙ ПІД ТВІЙ АКАУНТ) ---
-# Ставимо Lite першою, бо вона найімовірніше безкоштовна
-MODELS_TO_TRY = [
-    "gemini-2.0-flash-lite-001",
-    "gemini-2.0-flash-lite",
-    "gemini-2.0-flash-001",
-    "gemini-2.5-flash", 
-    "gemini-2.0-flash"
-]
-
-# --- ІНІЦІАЛІЗАЦІЯ ---
+# --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
 
 if not REDIS_URL:
-    raise ValueError("Не знайдено змінну оточення KV_URL")
+    raise ValueError("Не найдена переменная окружения KV_URL для Redis.")
 
 redis = Redis.from_url(REDIS_URL)
 storage = RedisStorage(redis=redis)
 dp = Dispatcher(storage=storage)
 app = FastAPI()
 
-# --- СТАНИ ---
+# --- СОСТОЯНИЯ ---
 class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
-    waiting_for_receipt = State()
+    waiting_for_ig = State() # НОВОЕ: Ждем ник в инсте
+    waiting_for_receipt_number = State() # НОВОЕ: Ждем номер чека
+    waiting_for_receipt_photo = State() # Ждем фото чека
 
 # --- КЛАВІАТУРИ ---
 def get_main_reply_kb():
@@ -69,129 +50,115 @@ def get_main_reply_kb():
         resize_keyboard=True
     )
 
+def get_inline_start_kb():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt")],
+            [InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")],
+            [InlineKeyboardButton(text="📸 Наш Instagram 1", url=INSTAGRAM_LINK_1)],
+            [InlineKeyboardButton(text="📸 Наш Instagram 2", url=INSTAGRAM_LINK_2)]
+        ]
+    )
+
 def get_cancel_kb():
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Скасувати")]],
         resize_keyboard=True
     )
 
-def get_inline_start_kb():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt")],
-            [InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")],
-            [InlineKeyboardButton(text="📸 Наш Instagram", url=INSTAGRAM_LINK)]
-        ]
-    )
-
-def get_manual_review_kb():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="👨‍💻 Відправити на перевірку", callback_data="force_manual_review")],
-            [InlineKeyboardButton(text="❌ Скасувати", callback_data="cancel_upload")]
-        ]
-    )
-
-# --- ФУНКЦІЯ ПЕРЕВІРКИ (REST API - TERMINATOR MODE) ---
-async def check_receipt_with_ai(photo_bytes):
-    if not GOOGLE_AI_KEY:
-        return False, "❌ Помилка: Немає API ключа"
+# --- СПІЛЬНА ЛОГІКА ДЛЯ КНОПОК ---
+async def process_show_cabinet(target_message, user_id: int):
+    user_data = await redis.hgetall(f"user:{user_id}")
     
-    b64_image = base64.b64encode(photo_bytes).decode('utf-8')
-    last_error = ""
+    if not user_data:
+        await target_message.answer(
+            "🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Завантажити чек», щоб створити профіль та додати перший чек!", 
+            reply_markup=get_main_reply_kb()
+        )
+        return
 
-    # Проходимо по списку моделей
-    for model_name in MODELS_TO_TRY:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GOOGLE_AI_KEY}"
-        
-        try:
-            prompt_text = f"""
-            Analyze this receipt image.
-            Target Keywords: {PROMO_PRODUCTS_STR}
-            
-            INSTRUCTIONS:
-            1. Read ALL text from the receipt.
-            2. Check if ANY of the Target Keywords appear in the text (ignore case).
-            3. If FOUND: Start response with "YES" and list the word.
-            4. If NOT FOUND: Start response with "NO" and list 5-10 words you actually see.
-            """
+    fio = user_data.get(b'fio', b'').decode('utf-8')
+    phone = user_data.get(b'phone', b'').decode('utf-8')
+    ig = user_data.get(b'ig', b'').decode('utf-8')
+    receipts_count = user_data.get(b'receipts', b'0').decode('utf-8')
 
-            payload = {
-                "contents": [{
-                    "parts": [
-                        {"text": prompt_text},
-                        {"inline_data": {
-                            "mime_type": "image/jpeg", 
-                            "data": b64_image
-                        }}
-                    ]
-                }]
-            }
+    cabinet_text = (
+        "👤 <b>Ваш особистий кабінет:</b>\n\n"
+        f"🔸 <b>ПІБ:</b> {fio}\n"
+        f"🔸 <b>Телефон:</b> {phone}\n"
+        f"🔸 <b>Instagram:</b> {ig}\n"
+        f"🎫 <b>Зареєстровано чеків:</b> {receipts_count}\n\n"
+        "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
+    )
+    await target_message.answer(cabinet_text, parse_mode="HTML")
 
-            async with aiohttp.ClientSession() as session:
-                async with session.post(url, json=payload) as response:
-                    
-                    # 200 = Успіх
-                    if response.status == 200:
-                        result = await response.json()
-                        try:
-                            answer = result['candidates'][0]['content']['parts'][0]['text'].strip()
-                            if answer.upper().startswith("YES"):
-                                return True, f"Model ({model_name}): {answer}"
-                            else:
-                                return False, f"Model ({model_name}): {answer}"
-                        except Exception:
-                            continue 
+async def process_start_upload(target_message, user_id: int, state: FSMContext):
+    user_data = await redis.hgetall(f"user:{user_id}")
+    
+    # Если нет инсты в базе (значит регистрация не пройдена)
+    if not user_data or b'ig' not in user_data:
+        await target_message.answer(
+            "📝 Для початку реєстрації, будь ласка, <b>напишіть ваше ПІБ</b> (Прізвище, Ім'я, По батькові):", 
+            reply_markup=get_cancel_kb(),
+            parse_mode="HTML"
+        )
+        await state.set_state(Registration.waiting_for_fio)
+    else:
+        # Если юзер уже есть в базе, сразу просим номер нового чека
+        await target_message.answer(
+            "🧾 <b>Введіть НОМЕР вашого чека</b> (тільки цифри/літери):", 
+            reply_markup=get_cancel_kb(),
+            parse_mode="HTML"
+        )
+        await state.set_state(Registration.waiting_for_receipt_number)
 
-                    # Якщо помилка квоти (429) або не знайдено (404) - йдемо до наступної моделі
-                    error_text = await response.text()
-                    last_error = f"{model_name}: {response.status}"
-                    # logging.warning(f"Failed {model_name}: {error_text}")
-                    continue
-                    
-        except Exception as e:
-            last_error = f"Exception {model_name}: {str(e)}"
-            continue
 
-    # Якщо нічого не спрацювало
-    return False, f"Всі моделі відмовили. Остання: {last_error}"
-
-# --- ОБРОБНИКИ ---
-
+# --- ОБРОБНИКИ КОМАНД ТА ПОВІДОМЛЕНЬ ---
 @dp.message(Command("start"))
 @dp.message(F.text == "❌ Скасувати")
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.set_state(None) 
-    await message.answer("Головне меню 👇", reply_markup=get_main_reply_kb())
-    await message.answer("👋 <b>Вітаємо у розіграші!</b>", reply_markup=get_inline_start_kb(), parse_mode="HTML")
+    await message.answer("Головне меню відкрито 👇", reply_markup=get_main_reply_kb())
+    welcome_text = (
+        "👋 <b>Вітаємо у нашому святковому розіграші!</b> 🎉\n\n"
+        "Тут ви можете реєструвати чеки за покупку нашої продукції та вигравати неймовірні призи! 🎁\n\n"
+        "⚠️ <b>Обов'язкова умова:</b> підписка на наші дві Instagram сторінки!\n\n"
+        "Оберіть потрібний розділ нижче 👇"
+    )
+    await message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
-@dp.callback_query(F.data == "cancel_upload")
-async def callback_cancel(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    await cmd_start(call.message, state)
 
 @dp.message(Command("sendall"))
 async def cmd_sendall(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
     text_to_send = message.text.replace("/sendall", "").strip()
     if not text_to_send:
-        await message.answer("Введіть текст.")
+        await message.answer("⚠️ Ви не ввели текст. Використання: `/sendall Ваш текст`", parse_mode="Markdown")
         return
-    await message.answer("⏳ Розсилка...")
+    await message.answer("⏳ Розпочинаю розсилку...")
     keys = await redis.keys("user:*")
-    success, error = 0, 0
+    success_count, error_count = 0, 0
     for key in keys:
-        uid = key.decode('utf-8').split(":")[1]
+        user_id_str = key.decode('utf-8').split(":")[1]
         try:
-            await bot.send_message(chat_id=int(uid), text=text_to_send, parse_mode="HTML")
-            success += 1
-        except: error += 1
-    await message.answer(f"✅ Успішно: {success}, Помилок: {error}")
+            await bot.send_message(chat_id=int(user_id_str), text=text_to_send, parse_mode="HTML")
+            success_count += 1
+        except Exception as e:
+            error_count += 1
+    await message.answer(f"✅ <b>Розсилку завершено!</b>\n\n🟢 Доставлено: {success_count}\n🔴 Помилок: {error_count}", parse_mode="HTML")
+
 
 @dp.message(F.text == "🎁 Умови розіграшу")
 async def show_rules(message: types.Message):
-    products_list = "\n".join([f"• {p}" for p in PROMO_PRODUCTS_LIST])
-    await message.answer(f"Купуйте товари брендів:\n{products_list}\n\nЗавантажуйте чек та вигравайте!", parse_mode="HTML")
+    rules = (
+        "📜 <b>Умови дуже прості:</b>\n\n"
+        "1️⃣ Бути підписаним на наші 2 сторінки в Instagram.\n"
+        "2️⃣ Купувати нашу продукцію.\n"
+        "3️⃣ Натискати «Завантажити чек» у цьому боті.\n"
+        "4️⃣ Вводити номер чека та надсилати його фото.\n\n"
+        "Більше чеків — більше шансів на перемогу! 🍀"
+    )
+    await message.answer(rules, parse_mode="HTML")
 
 @dp.message(F.text == "👤 Мій кабінет")
 async def show_cabinet_msg(message: types.Message):
@@ -202,15 +169,6 @@ async def show_cabinet_call(call: CallbackQuery):
     await call.answer() 
     await process_show_cabinet(call.message, call.from_user.id)
 
-async def process_show_cabinet(target_message, user_id):
-    user_data = await redis.hgetall(f"user:{user_id}")
-    if not user_data:
-        await target_message.answer("Ви ще не зареєстровані.", reply_markup=get_main_reply_kb())
-        return
-    fio = user_data.get(b'fio', b'').decode('utf-8')
-    receipts_count = user_data.get(b'receipts', b'0').decode('utf-8')
-    await target_message.answer(f"👤 <b>Особистий кабінет:</b>\n\n🔸 ПІБ: {fio}\n🎫 Чеків: {receipts_count}", parse_mode="HTML")
-
 @dp.message(F.text == "🧾 Завантажити чек")
 async def start_upload_msg(message: types.Message, state: FSMContext):
     await process_start_upload(message, message.from_user.id, state)
@@ -220,122 +178,139 @@ async def start_upload_call(call: CallbackQuery, state: FSMContext):
     await call.answer()
     await process_start_upload(call.message, call.from_user.id, state)
 
-async def process_start_upload(target_message, user_id, state):
-    user_data = await redis.hgetall(f"user:{user_id}")
-    if not user_data or b'phone' not in user_data:
-        await target_message.answer("📝 Введіть ваше Прізвище та Ім'я:", reply_markup=get_cancel_kb())
-        await state.set_state(Registration.waiting_for_fio)
-    else:
-        await target_message.answer("📸 Надішліть фото чека (система автоматично перевірить наявність товару).", reply_markup=get_cancel_kb())
-        await state.set_state(Registration.waiting_for_receipt)
-
 @dp.message(Registration.waiting_for_fio)
 async def process_fio(message: types.Message, state: FSMContext):
     await state.update_data(fio=message.text)
-    kb = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="📱 Поділитися номером", request_contact=True)]], resize_keyboard=True)
-    await message.answer("Чудово! Натисніть кнопку:", reply_markup=kb)
+    kb = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Поділитися номером", request_contact=True)],
+            [KeyboardButton(text="❌ Скасувати")]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True
+    )
+    await message.answer("Чудово! Тепер введіть ваш номер телефону або натисніть кнопку нижче:", reply_markup=kb)
     await state.set_state(Registration.waiting_for_phone)
 
 @dp.message(Registration.waiting_for_phone)
 async def process_phone(message: types.Message, state: FSMContext):
     phone = message.contact.phone_number if message.contact else message.text
-    fsm_data = await state.get_data()
-    user_id = message.from_user.id
-    await redis.hset(f"user:{user_id}", mapping={"fio": fsm_data.get("fio"), "phone": phone, "receipts": 0})
-    await message.answer("✅ Реєстрація успішна! Тепер надішліть фото чека 📸", reply_markup=get_cancel_kb())
-    await state.set_state(Registration.waiting_for_receipt)
-
-# --- ОБРОБКА ФОТО ---
-@dp.message(Registration.waiting_for_receipt, F.photo)
-async def process_receipt_photo(message: types.Message, state: FSMContext):
-    waiting_msg = await message.answer("⏳ <b>AI сканує чек...</b>", parse_mode="HTML")
+    await state.update_data(phone=phone)
     
-    photo = message.photo[-1]
-    file_info = await bot.get_file(photo.file_id)
-    photo_bytes = BytesIO()
-    await bot.download_file(file_info.file_path, destination=photo_bytes)
-    photo_data = photo_bytes.getvalue()
+    await message.answer(
+        "📸 <b>Введіть ваш нікнейм в Instagram</b> (наприклад: @vash_nik):\n\n"
+        "<i>Ми перевіримо підписку на наші сторінки під час розіграшу!</i>", 
+        reply_markup=get_cancel_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(Registration.waiting_for_ig)
 
-    # Перевірка
-    is_valid, ai_response = await check_receipt_with_ai(photo_data)
+@dp.message(Registration.waiting_for_ig)
+async def process_ig(message: types.Message, state: FSMContext):
+    ig = message.text
+    fsm_data = await state.get_data()
+    fio = fsm_data.get("fio", "Не вказано")
+    phone = fsm_data.get("phone", "Не вказано")
+    user_id = message.from_user.id
+    
+    # ЗБЕРІГАЄМО ПРОФІЛЬ В БАЗУ НАЗАВЖДИ
+    await redis.hset(f"user:{user_id}", mapping={"fio": fio, "phone": phone, "ig": ig, "receipts": 0})
+    
+    await message.answer(
+        "✅ <b>Реєстрація успішна!</b>\n\n🧾 Тепер <b>введіть НОМЕР вашого чека</b>:", 
+        reply_markup=get_cancel_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(Registration.waiting_for_receipt_number)
 
-    if not is_valid:
-        await waiting_msg.delete()
-        await state.update_data(last_photo_id=photo.file_id)
-        
-        # Звіт адміну
-        report = f"⚠️ <b>АВТО-ВІДМОВА</b>\n\n🤖 <b>AI відповідь:</b>\n{ai_response[:500]}..."
-        try:
-            await bot.send_message(chat_id=ADMIN_ID, text=report, parse_mode="HTML")
-        except: pass
+@dp.message(Registration.waiting_for_receipt_number)
+async def process_receipt_number(message: types.Message, state: FSMContext):
+    # Зберігаємо номер чека у тимчасову пам'ять
+    await state.update_data(receipt_number=message.text)
+    
+    await message.answer(
+        "📸 Тепер відправте <b>ФОТО цього чека</b> для підтвердження:", 
+        reply_markup=get_cancel_kb(),
+        parse_mode="HTML"
+    )
+    await state.set_state(Registration.waiting_for_receipt_photo)
 
-        await message.answer(
-            "⚠️ <b>Товар не знайдено.</b>\nЯкщо ви впевнені, натисніть кнопку для ручної перевірки.",
-            reply_markup=get_manual_review_kb(),
-            parse_mode="HTML"
-        )
-        return
-
-    # Збереження
-    await finalize_receipt(message, state, photo.file_id, f"✅ AI OK: {ai_response[:50]}...")
-    await waiting_msg.delete()
-
-@dp.callback_query(F.data == "force_manual_review")
-async def process_manual_review(call: CallbackQuery, state: FSMContext):
-    await call.answer()
-    data = await state.get_data()
-    photo_id = data.get("last_photo_id")
-    if not photo_id:
-        await call.message.answer("Помилка: фото втрачено.")
-        return
-    await finalize_receipt(call.message, state, photo_id, "⚠️ РУЧНА ПЕРЕВІРКА")
-
-async def finalize_receipt(message, state, photo_id, admin_status_text):
-    user_id = message.chat.id
+@dp.message(Registration.waiting_for_receipt_photo, F.photo)
+async def process_receipt_photo(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    
     user_data = await redis.hgetall(f"user:{user_id}")
     fio = user_data.get(b'fio', b'').decode('utf-8')
     phone = user_data.get(b'phone', b'').decode('utf-8')
-    username = f"@{message.chat.username}" if message.chat.username else "Немає"
-
+    ig = user_data.get(b'ig', b'').decode('utf-8')
+    
+    fsm_data = await state.get_data()
+    receipt_number_text = fsm_data.get("receipt_number", "Не вказано")
+    
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
     new_count = await redis.hget(f"user:{user_id}", "receipts")
     new_count = new_count.decode('utf-8')
 
-    try:
-        await bot.send_photo(
-            chat_id=ADMIN_ID, 
-            photo=photo_id, 
-            caption=f"{admin_status_text}\nЧек №{new_count}\n👤 {fio}\n📱 {phone}", 
-            parse_mode="HTML"
-        )
-    except Exception as e:
-        logging.error(f"Error sending to admin: {e}")
+    photo_id = message.photo[-1].file_id
+    username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
 
+    # 1. Відправка адмінам в Telegram
+    admin_caption = (
+        f"🆕 <b>Новий чек! (У клієнта чеків: {new_count})</b>\n\n"
+        f"🧾 <b>Номер чека (введений):</b> {receipt_number_text}\n\n"
+        f"👤 <b>ПІБ:</b> {fio}\n"
+        f"📱 <b>Телефон:</b> {phone}\n"
+        f"📸 <b>Instagram:</b> {ig}\n"
+        f"💬 <b>TG Юзернейм:</b> {username}"
+    )
+    
+    try:
+        await bot.send_photo(chat_id=ADMIN_ID, photo=photo_id, caption=admin_caption, parse_mode="HTML")
+    except Exception as e:
+        logging.error(f"Помилка відправки в групу: {e}")
+
+    # 2. Відправка в Google Таблицю
     if GOOGLE_WEBHOOK_URL:
+        google_data = {
+            "fio": fio,
+            "phone": phone,
+            "tg_username": username,
+            "ig_username": ig,
+            "receipt_count": new_count,
+            "receipt_number": receipt_number_text
+        }
         try:
             async with aiohttp.ClientSession() as session:
-                await session.post(GOOGLE_WEBHOOK_URL, json={
-                    "fio": fio, "phone": phone, "username": username, "receipt_number": new_count
-                })
-        except: pass
+                async with session.post(GOOGLE_WEBHOOK_URL, json=google_data) as response:
+                    if response.status != 200:
+                        error_text = await response.text()
+                        await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Помилка Google Таблиці! Статус: {response.status}\nТекст: {error_text}")
+        except Exception as e:
+            await bot.send_message(chat_id=ADMIN_ID, text=f"⚠️ Технічна помилка підключення до Google: {e}")
 
-    success_msg = f"✅ <b>Чек прийнято!</b> (№{new_count})"
-    if isinstance(message, types.Message): 
-        await message.answer(success_msg, reply_markup=get_main_reply_kb(), parse_mode="HTML")
-    else:
-        await message.answer(success_msg, reply_markup=get_main_reply_kb(), parse_mode="HTML")
-    
+    await message.answer(
+        f"✅ <b>Чек успішно прийнято!</b>\n\nЦе ваш чек №{new_count}. Дякуємо за участь!", 
+        reply_markup=get_main_reply_kb(),
+        parse_mode="HTML"
+    )
     await state.set_state(None)
 
-@dp.message(Registration.waiting_for_receipt, F.text)
+@dp.message(Registration.waiting_for_receipt_photo, F.text)
 async def error_receipt_format(message: types.Message):
-    await message.answer("Надішліть ФОТО 📸")
+    await message.answer("Будь ласка, відправте саме <b>ФОТО</b> чека 📸", parse_mode="HTML")
 
+# --- WEBHOOK ---
 @app.get("/")
-async def health_check(): return {"status": "ok"}
+async def health_check():
+    return {"status": "ok", "message": "Бот працює!"}
 
 @app.post("/api/webhook")
 async def telegram_webhook(request: Request):
-    update = types.Update(**await request.json())
-    await dp.feed_update(bot, update)
-    return {"status": "ok"}
+    try:
+        data = await request.json()
+        update = types.Update(**data)
+        await dp.feed_update(bot, update)
+        return {"status": "ok"}
+    except Exception as e:
+        logging.error(f"Error: {e}")
+        return {"status": "error", "message": str(e)}
