@@ -19,8 +19,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
-INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
-INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
+INSTAGRAM_LINK_1 = "https://www.instagram.com/tm.sama.ua/" 
+INSTAGRAM_LINK_2 = "https://www.instagram.com/koshik_shop_/" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
