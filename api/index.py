@@ -21,10 +21,10 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 REDIS_URL = os.environ.get("KV_URL") or os.environ.get("REDIS_URL")
 GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL") 
 ADMIN_ID = "-1003731208847" 
-SUPPORT_TOPIC_ID = 101  # <-- ВПИШИ СЮДА ID ТЕМЫ ДЛЯ ТЕХПОДДЕРЖКИ (например: 45)
-RECEIPTS_TOPIC_ID = 117 # <-- ВПИШИ СЮДА ID ТЕМЫ ДЛЯ ЧЕКОВ (например: 56)
-INSTAGRAM_LINK_1 = "www.instagram.com/tm.sama.ua" 
-INSTAGRAM_LINK_2 = "www.instagram.com/koshik_shop_" 
+SUPPORT_TOPIC_ID = 101  
+RECEIPTS_TOPIC_ID = 117 
+INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
+INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
@@ -79,7 +79,7 @@ def get_back_to_main_inline_kb():
         ]
     )
 
-# ЄДИНА КНОПКА ДЛЯ ВСІЄЇ НАВІГАЦІЇ
+# ЄДИНА КНОПКА ДЛЯ ВСІЄЇ НАВІГАЦІЇ (без Скасувати)
 def get_inline_back_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]]
@@ -101,7 +101,7 @@ async def show_main_menu(target_message: types.Message, state: FSMContext):
     rm_msg = await target_message.answer("🔄 Оновлення...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
-welcome_text = """🎁 Вітаємо у розіграші від КОШИК та SAMA!
+    welcome_text = """🎁 Вітаємо у розіграші від КОШИК та SAMA!
 Весну зустрічай – подарунок хапай!
 
 🧾 Реєструй чек на суму від 250 грн
@@ -116,8 +116,7 @@ welcome_text = """🎁 Вітаємо у розіграші від КОШИК т
 
 📌 Обов'язкова умова участі в розіграші:
 Бути підписаним на Instagram-сторінку КОШИК та Instagram-сторінку TM SAMA."""
-        
-    )
+    
     try:
         await target_message.edit_text(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
     except:
@@ -176,32 +175,27 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
         await state.set_state(Registration.waiting_for_receipt_number)
 
 async def process_show_info(target_message):
-    info_text = (
-       📜 Як взяти участь:
+    info_text = """📜 <b>Як взяти участь:</b>
 
 1️⃣ Здійсни покупку в КОШИК на суму від 250 грн.
 2️⃣ Додай у чек будь-який товар від ТМ SAMA.
 3️⃣ Натисни «Зареєструвати чек» та надішли його фото в бот.
 4️⃣ Підпишись на сторінки в Instagram: КОШИК і ТМ SAMA.
 
-🏆 Що можна виграти?
-
+🏆 <b>Що можна виграти?</b>
 🥇 1 місце — мікрохвильова піч LG
 🥈 2 місце — праска Tefal
 🥉 3 місце — фен Philips
 🎁 4–6 місце — подарункові набори ТМ SAMA
 
-📅 Коли відбудеться розіграш?
-
+📅 <b>Коли відбудеться розіграш?</b>
 Термін дії акції: 01.04.2026 – 30.04.2026.
 01 травня буде обрано 6 переможців за допомогою рандомайзера серед усіх учасників.
-
 Результати розіграшу опублікуємо у сторіс на сторінках КОШИК та ТМ SAMA в Instagram.
 
-❗ Важливо знати:
+❗ <b>Важливо знати:</b>
+• Кількість чеків від одного учасника необмежена. Чим більше унікальних чеків — тим більше шансів виграти."""
 
-• Кількість чеків від одного учасника необмежена. Чим більше унікальних чеків — тим більше шансів виграти.
-    )
     try:
         await target_message.edit_text(info_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
     except:
@@ -558,7 +552,7 @@ async def admin_reject(call: CallbackQuery):
             break
             
     await redis.hincrby(f"user:{user_id}", "receipts", -1)
-    try: await bot.send_message(chat_id=user_id, text=f"⚠️ Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.", parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
+    try: await bot.send_message(chat_id=user_id, text=f"⚠️ Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором. Завантажте його правильно ще раз.", parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
     except: pass
         
     caption = call.message.html_text or call.message.caption or "Чек"
