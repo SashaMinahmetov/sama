@@ -101,11 +101,10 @@ async def show_main_menu(target_message: types.Message, state: FSMContext):
     rm_msg = await target_message.answer("🔄 Оновлення...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
-    welcome_text = (
-        🎁 Вітаємо у розіграші від КОШИК та SAMA!
-Весну зустрічай - подарунок хапай!
+welcome_text = """🎁 Вітаємо у розіграші від КОШИК та SAMA!
+Весну зустрічай – подарунок хапай!
 
-🧾Реєструй чек на суму від 250 грн
+🧾 Реєструй чек на суму від 250 грн
 з будь-яким одним або кількома товарами торговельної марки SAMA
 та отримай шанс виграти круті призи! 🎁
 
@@ -113,10 +112,10 @@ async def show_main_menu(target_message: types.Message, state: FSMContext):
 🥈 2 місце — праска Tefal
 🥉 3 місце — фен Philips
 
-🎁 4–6 місце — подарункові набори ТМ SAMA
+🎁 4-6 місце — подарункові набори TM SAMA
 
-📌 Обов’язкова умова участі в розіграші:
-Бути підписаним на Instagram-сторінку КОШИК та Instagram-сторінку ТМ SAMA.
+📌 Обов'язкова умова участі в розіграші:
+Бути підписаним на Instagram-сторінку КОШИК та Instagram-сторінку TM SAMA."""
         
     )
     try:
