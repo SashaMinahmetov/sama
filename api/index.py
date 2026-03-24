@@ -23,8 +23,9 @@ GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL")
 ADMIN_ID = "-1003731208847" 
 SUPPORT_TOPIC_ID = 101  
 RECEIPTS_TOPIC_ID = 117 
-INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
-INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
+# Поменял переменные для удобства
+INSTAGRAM_LINK_KOSHIK = "https://instagram.com/koshik_shop_"
+INSTAGRAM_LINK_SAMA = "https://instagram.com/tm.sama.ua" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
@@ -64,10 +65,10 @@ def get_inline_start_kb():
                 InlineKeyboardButton(text="💬 Техпідтримка", callback_data="support_btn")
             ],
             [
-                InlineKeyboardButton(text="🌐 Instagram - SAMA", url=INSTAGRAM_LINK_1)
+                InlineKeyboardButton(text="🌐 Instagram - koshik_shop", url=INSTAGRAM_LINK_KOSHIK)
             ],
             [
-                InlineKeyboardButton(text="🌐 Instagram - koshik_shop", url=INSTAGRAM_LINK_2)
+                InlineKeyboardButton(text="🌐 Instagram - SAMA", url=INSTAGRAM_LINK_SAMA)
             ]
         ]
     )
@@ -102,20 +103,20 @@ async def show_main_menu(target_message: types.Message, state: FSMContext):
     await rm_msg.delete()
     
     welcome_text = """🎁 Вітаємо у розіграші від КОШИК та SAMA!
-Весну зустрічай – подарунок хапай!
+Весну зустрічай - подарунок хапай!
 
 🧾 Реєструй чек на суму від 250 грн
 з будь-яким одним або кількома товарами торговельної марки SAMA
 та отримай шанс виграти круті призи! 🎁
 
-🥇 1 місце — мікрохвильова піч LG
-🥈 2 місце — праска Tefal
-🥉 3 місце — фен Philips
+🥇 1 місце - мікрохвильова піч LG
+🥈 2 місце - праска Tefal
+🥉 3 місце - фен Philips
 
-🎁 4-6 місце — подарункові набори TM SAMA
+🎁 4-6 місце - подарункові набори TM SAMA
 
 📌 Обов'язкова умова участі в розіграші:
-Бути підписаним на Instagram-сторінки КОШИК та SAMA."""
+Бути підписаним на Instagram-сторінки КОШИК та SAMA"""
     
     try:
         await target_message.edit_text(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
@@ -189,13 +190,12 @@ async def process_show_info(target_message):
 🎁 4–6 місце — подарункові набори ТМ SAMA
 
 📅 <b>Коли відбудеться розіграш?</b>
-Термін дії акції: 01.04.2026 – 30.04.2026.
+Термін дії акції: 01.04.2026 - 30.04.2026.
 🎲 1 травня буде обрано 6 переможців за допомогою рандомайзера серед усіх учасників.
 📢 Результати розіграшу опублікуємо в Instagram-сторіс на сторінках КОШИК та ТМ SAMA.
-
 ❗ <b>Важливо знати:</b>
 ✔ Кількість чеків від одного учасника необмежена
-✔ Чим більше унікальних чеків — тим більше шансів виграти"""
+✔ Чим більше унікальних чеків - тим більше шансів виграти"""
 
     try:
         await target_message.edit_text(info_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
@@ -440,7 +440,7 @@ async def process_ig(message: types.Message, state: FSMContext):
 
 async def send_subscription_step_1(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
+        [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_KOSHIK)],
         [InlineKeyboardButton(text="🔄 Перевірити підписку 1", callback_data="check_sub_1")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
     ])
@@ -454,7 +454,7 @@ async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
     await asyncio.sleep(2) 
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
+        [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_SAMA)],
         [InlineKeyboardButton(text="🔄 Перевірити підписку 2", callback_data="check_sub_2")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
     ])
