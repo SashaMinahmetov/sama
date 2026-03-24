@@ -54,22 +54,22 @@ def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt"),
-                InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")
+                InlineKeyboardButton(text="🧾 Зареєструвати чек", callback_data="upload_receipt")
             ],
             [
-                InlineKeyboardButton(text="🎁 Умови розіграшу", callback_data="show_rules"),
-                InlineKeyboardButton(text="🏆 Призи та FAQ", callback_data="show_faq")
+                InlineKeyboardButton(text="🎁 Умови розіграшу та призи", callback_data="show_rules")
+            ],
+            [
+                InlineKeyboardButton(text="📊 Мої чеки / Мій профіль", callback_data="my_cabinet")
             ],
             [
                 InlineKeyboardButton(text="💬 Техпідтримка", callback_data="support_btn")
             ],
-            # Тепер кожна кнопка в окремих дужках [], тому вони будуть одна під одною
             [
-                InlineKeyboardButton(text="🌐 Instagram - SAMA", url=INSTAGRAM_LINK_1)
+                InlineKeyboardButton(text="📸 Instagram КОШИК", url=INSTAGRAM_LINK_2)
             ],
             [
-                InlineKeyboardButton(text="🌐 Instagram - koshik_shop", url=INSTAGRAM_LINK_2)
+                InlineKeyboardButton(text="📸 Instagram SAMA", url=INSTAGRAM_LINK_1)
             ]
         ]
     )
@@ -152,12 +152,35 @@ async def process_start_upload(target_message, user_id: int, state: FSMContext):
         await state.set_state(Registration.waiting_for_receipt_number)
 
 async def process_show_rules(target_message):
-    rules = "📜 <b>Умови дуже прості:</b>\n\n1️⃣ Підписка на 2 сторінки.\n2️⃣ Купівля акційної продукції.\n3️⃣ Завантаження чека.\n\nБільше чеків — більше шансів!"
-    await target_message.answer(rules, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
+    rules_text = (
+        "🎁 <b>Умови участі у розіграші</b>\n\n"
 
-async def process_show_faq(target_message):
-    faq_text = "🏆 <b>Призи:</b>\n• Головний приз...\n\n❓ Зберігати чек ОБОВ'ЯЗКОВО."
-    await target_message.answer(faq_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
+        "🧾 <b>Що потрібно зробити:</b>\n"
+        "1️⃣ Купити продукцію <b>ТМ SAMA</b> на суму від <b>250 грн</b>\n"
+        "2️⃣ Зареєструвати чек у цьому боті\n"
+        "3️⃣ Зберігати чек до завершення акції\n\n"
+
+        "📌 <b>Обов'язкова умова:</b>\n"
+        "Підписка на:\n"
+        "• Instagram <b>КОШИК</b>\n"
+        "• Instagram <b>SAMA</b>\n\n"
+
+        "🏆 <b>Призи розіграшу:</b>\n\n"
+
+        "🥇 1 місце — мікрохвильова піч <b>LG</b>\n"
+        "🥈 2 місце — праска <b>Tefal</b>\n"
+        "🥉 3 місце — фен <b>Philips</b>\n\n"
+
+        "🎁 4–6 місце — подарункові набори <b>ТМ SAMA</b>\n\n"
+
+        "🍀 Чим більше чеків — тим більше шансів на перемогу!"
+    )
+
+    await target_message.answer(
+        rules_text,
+        parse_mode="HTML",
+        reply_markup=get_back_to_main_inline_kb()
+    )
 
 # --- ОБРОБНИКИ КОМАНД ---
 @dp.message(Command("start"))
@@ -270,11 +293,6 @@ async def back_to_main_call(call: CallbackQuery, state: FSMContext):
 async def show_rules_call(call: CallbackQuery):
     await call.answer()
     await process_show_rules(call.message)
-
-@dp.callback_query(F.data == "show_faq")
-async def show_faq_call(call: CallbackQuery):
-    await call.answer()
-    await process_show_faq(call.message)
 
 @dp.callback_query(F.data == "my_cabinet")
 async def show_cabinet_call(call: CallbackQuery):
