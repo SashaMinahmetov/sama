@@ -3,6 +3,8 @@ import logging
 import aiohttp
 import asyncio
 import re
+import csv  # <-- Добавили для Excel
+import io   # <-- Добавили для работы с файлом
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
@@ -23,9 +25,8 @@ GOOGLE_WEBHOOK_URL = os.environ.get("GOOGLE_WEBHOOK_URL")
 ADMIN_ID = "-1003731208847" 
 SUPPORT_TOPIC_ID = 101  
 RECEIPTS_TOPIC_ID = 117 
-# Поменял переменные для удобства
-INSTAGRAM_LINK_KOSHIK = "https://instagram.com/koshik_shop_"
-INSTAGRAM_LINK_SAMA = "https://instagram.com/tm.sama.ua" 
+INSTAGRAM_LINK_1 = "https://instagram.com/tm.sama.ua" 
+INSTAGRAM_LINK_2 = "https://instagram.com/koshik_shop_" 
 
 # --- ИНИЦИАЛИЗАЦИЯ ---
 bot = Bot(token=BOT_TOKEN)
@@ -65,10 +66,10 @@ def get_inline_start_kb():
                 InlineKeyboardButton(text="💬 Техпідтримка", callback_data="support_btn")
             ],
             [
-                InlineKeyboardButton(text="🌐 Instagram - koshik_shop", url=INSTAGRAM_LINK_KOSHIK)
+                InlineKeyboardButton(text="🌐 Instagram - koshik_shop", url=INSTAGRAM_LINK_2)
             ],
             [
-                InlineKeyboardButton(text="🌐 Instagram - SAMA", url=INSTAGRAM_LINK_SAMA)
+                InlineKeyboardButton(text="🌐 Instagram - SAMA", url=INSTAGRAM_LINK_1)
             ]
         ]
     )
@@ -216,9 +217,68 @@ async def cmd_cleardb(message: types.Message):
 @dp.message(Command("stats"))
 async def cmd_stats(message: types.Message):
     if str(message.chat.id) != ADMIN_ID: return 
-    users = len(await redis.keys("user:*"))
-    receipts = await redis.scard("used_receipts") 
-    await message.answer(f"📊 <b>Статистика:</b>\nУчасників: {users}\nЧеків: {receipts}", parse_mode="HTML")
+    
+    users_keys = await redis.keys("user:*")
+    users_count = len(users_keys)
+    unique_receipts = await redis.scard("used_receipts") 
+    
+    stats_text = (
+        "📊 <b>Статистика розіграшу:</b>\n\n"
+        f"👤 Усього учасників: <b>{users_count}</b>\n"
+        f"🧾 Чеків у базі: <b>{unique_receipts}</b>\n\n"
+    )
+    
+    # Збираємо детальну інформацію про всіх користувачів
+    users_data = []
+    for key in users_keys:
+        u = await redis.hgetall(key)
+        if u:
+            user_id = key.decode('utf-8').split(":")[1]
+            fio = u.get(b'fio', b'').decode('utf-8')
+            phone = u.get(b'phone', b'').decode('utf-8')
+            ig = u.get(b'ig', b'').decode('utf-8')
+            tg_user = u.get(b'tg_username', b'').decode('utf-8')
+            receipts = int(u.get(b'receipts', b'0').decode('utf-8'))
+            
+            users_data.append({
+                "id": user_id, 
+                "fio": fio, 
+                "phone": phone, 
+                "ig": ig, 
+                "tg": tg_user, 
+                "receipts": receipts
+            })
+    
+    # Сортуємо учасників за кількістю чеків (від найбільшого до найменшого)
+    users_data.sort(key=lambda x: x["receipts"], reverse=True)
+    
+    # Виводимо ТОП-10 учасників у текст повідомлення
+    if users_data:
+        stats_text += "🏆 <b>ТОП активних учасників:</b>\n"
+        for i, u in enumerate(users_data[:10], 1):
+            stats_text += f"{i}. {u['fio']} — <b>{u['receipts']} чеків</b>\n"
+            
+    await message.answer(stats_text, parse_mode="HTML")
+    
+    # Якщо є учасники, генеруємо CSV файл для Excel
+    if users_data:
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter=';') 
+        
+        # Заголовки таблиці
+        writer.writerow(["ID", "ПІБ", "Телефон", "Instagram", "Telegram", "Кількість чеків"])
+        
+        # Дані
+        for u in users_data:
+            writer.writerow([u["id"], u["fio"], u["phone"], u["ig"], u["tg"], u["receipts"]])
+            
+        # Кодуємо в utf-8-sig
+        csv_bytes = output.getvalue().encode('utf-8-sig') 
+        
+        from aiogram.types import BufferedInputFile
+        document = BufferedInputFile(csv_bytes, filename=f"stats_{datetime.now().strftime('%d-%m-%Y')}.csv")
+        
+        await message.answer_document(document=document, caption="📁 <b>Повний список учасників</b>\n<i>Файл можна відкрити в Excel або Google Таблицях.</i>", parse_mode="HTML")
 
 @dp.message(Command("sendall"))
 async def cmd_sendall(message: types.Message):
@@ -440,7 +500,7 @@ async def process_ig(message: types.Message, state: FSMContext):
 
 async def send_subscription_step_1(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_KOSHIK)],
+        [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
         [InlineKeyboardButton(text="🔄 Перевірити підписку 1", callback_data="check_sub_1")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
     ])
@@ -454,7 +514,7 @@ async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
     await asyncio.sleep(2) 
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_SAMA)],
+        [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
         [InlineKeyboardButton(text="🔄 Перевірити підписку 2", callback_data="check_sub_2")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
     ])
