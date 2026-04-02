@@ -3,8 +3,8 @@ import logging
 import aiohttp
 import asyncio
 import re
-import csv  # <-- Добавили для Excel
-import io   # <-- Добавили для работы с файлом
+import csv  
+import io   
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
@@ -44,6 +44,7 @@ class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
     waiting_for_receipt_number = State() 
+    waiting_for_store_address = State()  # <-- ДОДАЛИ НОВИЙ КРОК
     waiting_for_ig = State()             
     waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
@@ -144,8 +145,11 @@ async def process_show_cabinet(target_message, user_id: int):
         history_text = "\n\n📋 <b>Історія ваших чеків:</b>\n"
         for item in history_items:
             try:
-                date_str, rec_num = item.decode('utf-8').split('|', 1)
-                history_text += f"🔹 {date_str} — № {rec_num}\n"
+                parts = item.decode('utf-8').split('|')
+                if len(parts) >= 2:
+                    date_str = parts[0]
+                    rec_num = parts[1]
+                    history_text += f"🔹 {date_str} — № {rec_num}\n"
             except: pass
     else:
         history_text = "\n\n📋 <b>Історія ваших чеків:</b>\nПоки що порожньо."
@@ -228,7 +232,6 @@ async def cmd_stats(message: types.Message):
         f"🧾 Чеків у базі: <b>{unique_receipts}</b>\n\n"
     )
     
-    # Збираємо детальну інформацію про всіх користувачів
     users_data = []
     for key in users_keys:
         u = await redis.hgetall(key)
@@ -238,6 +241,7 @@ async def cmd_stats(message: types.Message):
             phone = u.get(b'phone', b'').decode('utf-8')
             ig = u.get(b'ig', b'').decode('utf-8')
             tg_user = u.get(b'tg_username', b'').decode('utf-8')
+            last_store = u.get(b'last_store', b'').decode('utf-8') # <-- Дістаємо адресу магазину
             receipts = int(u.get(b'receipts', b'0').decode('utf-8'))
             
             users_data.append({
@@ -246,13 +250,12 @@ async def cmd_stats(message: types.Message):
                 "phone": phone, 
                 "ig": ig, 
                 "tg": tg_user, 
+                "last_store": last_store,
                 "receipts": receipts
             })
     
-    # Сортуємо учасників за кількістю чеків (від найбільшого до найменшого)
     users_data.sort(key=lambda x: x["receipts"], reverse=True)
     
-    # Виводимо ТОП-10 учасників у текст повідомлення
     if users_data:
         stats_text += "🏆 <b>ТОП активних учасників:</b>\n"
         for i, u in enumerate(users_data[:10], 1):
@@ -260,19 +263,16 @@ async def cmd_stats(message: types.Message):
             
     await message.answer(stats_text, parse_mode="HTML")
     
-    # Якщо є учасники, генеруємо CSV файл для Excel
     if users_data:
         output = io.StringIO()
         writer = csv.writer(output, delimiter=';') 
         
-        # Заголовки таблиці
-        writer.writerow(["ID", "ПІБ", "Телефон", "Instagram", "Telegram", "Кількість чеків"])
+        # Додаємо колонку з адресою
+        writer.writerow(["ID", "ПІБ", "Телефон", "Instagram", "Telegram", "Кількість чеків", "Адреса магазину (остання)"])
         
-        # Дані
         for u in users_data:
-            writer.writerow([u["id"], u["fio"], u["phone"], u["ig"], u["tg"], u["receipts"]])
+            writer.writerow([u["id"], u["fio"], u["phone"], u["ig"], u["tg"], u["receipts"], u["last_store"]])
             
-        # Кодуємо в utf-8-sig
         csv_bytes = output.getvalue().encode('utf-8-sig') 
         
         from aiogram.types import BufferedInputFile
@@ -336,14 +336,17 @@ async def back_action_call(call: CallbackQuery, state: FSMContext):
     current_state = await state.get_state()
     
     if current_state == Registration.waiting_for_receipt_photo.state:
-        await state.set_state(Registration.waiting_for_receipt_number)
-        await call.message.edit_text("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
+        await state.set_state(Registration.waiting_for_store_address)
+        await call.message.edit_text("📍 <b>Введіть адресу магазину, де була здійснена покупка:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
     elif current_state == Registration.waiting_for_ig.state:
-        await state.set_state(Registration.waiting_for_receipt_number)
-        await call.message.edit_text("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
+        await state.set_state(Registration.waiting_for_store_address)
+        await call.message.edit_text("📍 <b>Введіть адресу магазину, де була здійснена покупка:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
     elif current_state == Registration.waiting_for_subscription.state:
         await state.set_state(Registration.waiting_for_ig)
         await call.message.edit_text("📸 <b>Введіть ваш нікнейм в Instagram:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
+    elif current_state == Registration.waiting_for_store_address.state:
+        await state.set_state(Registration.waiting_for_receipt_number)
+        await call.message.edit_text("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
     elif current_state == Registration.waiting_for_receipt_number.state:
         user_data = await redis.hgetall(f"user:{call.from_user.id}")
         if not user_data or b'ig' not in user_data:
@@ -359,7 +362,6 @@ async def back_action_call(call: CallbackQuery, state: FSMContext):
         await rm_msg.delete()
         await call.message.answer("📝 Введіть ваше <b>ПІБ</b>:", reply_markup=get_inline_back_kb(), parse_mode="HTML")
     else:
-        # Для підтримки та всіх інших станів просто повертаємо в меню
         await call.message.delete()
         await show_main_menu(call.message, state)
 
@@ -457,6 +459,8 @@ async def process_phone(message: types.Message, state: FSMContext):
     await message.answer("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
     await state.set_state(Registration.waiting_for_receipt_number)
 
+
+# --- НОВИЙ КРОК: ЗАПИТ АДРЕСИ ---
 @dp.message(Registration.waiting_for_receipt_number)
 async def process_receipt_number(message: types.Message, state: FSMContext):
     if not message.text:
@@ -473,6 +477,19 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
         
     await state.update_data(receipt_number=receipt_num)
     
+    # Запитуємо адресу після чека
+    await message.answer("📍 <b>Введіть адресу магазину, де була здійснена покупка:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
+    await state.set_state(Registration.waiting_for_store_address)
+
+@dp.message(Registration.waiting_for_store_address)
+async def process_store_address(message: types.Message, state: FSMContext):
+    if not message.text:
+        await message.answer("⚠️ Будь ласка, введіть адресу текстом:", reply_markup=get_inline_back_kb())
+        return
+        
+    await state.update_data(store_address=message.text)
+    
+    # Після адреси робимо стандартну перевірку підписок
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     is_sub_checked = user_data.get(b'sub_checked', b'0').decode('utf-8') == '1'
@@ -486,6 +503,7 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
     else:
         await message.answer("📸 <b>Введіть ваш нікнейм в Instagram:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
         await state.set_state(Registration.waiting_for_ig)
+
 
 @dp.message(Registration.waiting_for_ig)
 async def process_ig(message: types.Message, state: FSMContext):
@@ -537,14 +555,20 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     
-    receipt_number_text = (await state.get_data()).get("receipt_number", "Не вказано")
+    state_data = await state.get_data()
+    receipt_number_text = state_data.get("receipt_number", "Не вказано")
+    store_address_text = state_data.get("store_address", "Не вказано") # <-- Дістаємо адресу з пам'яті
     
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
         now_str = (datetime.utcnow() + timedelta(hours=2)).strftime("%d.%m.%Y %H:%M")
-        await redis.rpush(f"user_receipts:{user_id}", f"{now_str}|{receipt_number_text}")
+        await redis.rpush(f"user_receipts:{user_id}", f"{now_str}|{receipt_number_text}|{store_address_text}")
     
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
+    
+    # Зберігаємо останню адресу магазину прямо в профіль користувача
+    await redis.hset(f"user:{user_id}", "last_store", store_address_text) 
+    
     new_count = (await redis.hget(f"user:{user_id}", "receipts")).decode('utf-8')
     
     tg_username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
@@ -563,15 +587,19 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
             "tg_username": tg_username,
             "ig_username": user_data.get(b'ig', b'').decode('utf-8'),
             "receipt_count": new_count,
-            "receipt_number": receipt_number_text
+            "receipt_number": receipt_number_text,
+            "store_address": store_address_text  # <-- Відправляємо адресу в Google
         }
         try:
             async with aiohttp.ClientSession() as session:
                 await session.post(GOOGLE_WEBHOOK_URL, json=google_data)
         except: pass
 
+    # Додаємо адресу в картку для модераторів
     admin_caption = (
-        f"🆕 <b>Новий чек!</b> (У клієнта: {new_count})\n\n🧾 <b>Номер:</b> {receipt_number_text}\n"
+        f"🆕 <b>Новий чек!</b> (У клієнта: {new_count})\n\n"
+        f"🧾 <b>Номер:</b> {receipt_number_text}\n"
+        f"📍 <b>Адреса:</b> {store_address_text}\n\n"
         f"👤 <b>ПІБ:</b> {google_data['fio']}\n📱 <b>Телефон:</b> {google_data['phone']}\n"
         f"📸 <b>Instagram:</b> {google_data['ig_username']}\n💬 <b>Юзернейм:</b> {tg_username}"
     )
@@ -608,7 +636,8 @@ async def admin_reject(call: CallbackQuery):
     await redis.srem("used_receipts", receipt_number)
     items = await redis.lrange(f"user_receipts:{user_id}", 0, -1)
     for item in items:
-        if item.decode('utf-8').endswith(f"|{receipt_number}"):
+        parts_item = item.decode('utf-8').split('|')
+        if len(parts_item) >= 2 and parts_item[1] == receipt_number:
             await redis.lrem(f"user_receipts:{user_id}", 1, item)
             break
             
