@@ -3,8 +3,8 @@ import logging
 import aiohttp
 import asyncio
 import re
-import csv  
-import io   
+import csv
+import io
 from datetime import datetime, timedelta
 from fastapi import FastAPI, Request
 from aiogram import Bot, Dispatcher, F, types
@@ -44,7 +44,7 @@ class Registration(StatesGroup):
     waiting_for_fio = State()
     waiting_for_phone = State()
     waiting_for_receipt_number = State() 
-    waiting_for_store_address = State()  # <-- ДОДАЛИ НОВИЙ КРОК
+    waiting_for_store_address = State()  # <-- ДОБАВЛЕН НОВЫЙ ШАГ
     waiting_for_ig = State()             
     waiting_for_subscription = State()   
     waiting_for_receipt_photo = State()  
@@ -52,25 +52,26 @@ class Registration(StatesGroup):
 class Support(StatesGroup):
     waiting_for_message = State()
 
-# --- КЛАВІАТУРИ (МАКСИМАЛЬНО ЧИСТІ) ---
+# --- КЛАВІАТУРИ ---
 def get_inline_start_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="🧾 Зареєструвати чек", callback_data="upload_receipt")
+                InlineKeyboardButton(text="🧾 Завантажити чек", callback_data="upload_receipt"),
+                InlineKeyboardButton(text="👤 Мій кабінет", callback_data="my_cabinet")
             ],
             [
-                InlineKeyboardButton(text="🎁 Умови розіграшу та призи", callback_data="show_info")
+                InlineKeyboardButton(text="🎁 Умови розіграшу", callback_data="show_rules"),
+                InlineKeyboardButton(text="🏆 Призи та FAQ", callback_data="show_faq")
             ],
             [
-                InlineKeyboardButton(text="👤 Мої чеки", callback_data="my_cabinet"),
                 InlineKeyboardButton(text="💬 Техпідтримка", callback_data="support_btn")
             ],
             [
-                InlineKeyboardButton(text="🌐 Instagram - koshik_shop", url=INSTAGRAM_LINK_2)
+                InlineKeyboardButton(text="🌐 Instagram - SAMA", url=INSTAGRAM_LINK_1)
             ],
             [
-                InlineKeyboardButton(text="🌐 Instagram - SAMA", url=INSTAGRAM_LINK_1)
+                InlineKeyboardButton(text="🌐 Instagram - koshik_shop", url=INSTAGRAM_LINK_2)
             ]
         ]
     )
@@ -82,7 +83,6 @@ def get_back_to_main_inline_kb():
         ]
     )
 
-# ЄДИНА КНОПКА ДЛЯ ВСІЄЇ НАВІГАЦІЇ (без Скасувати)
 def get_inline_back_kb():
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]]
@@ -104,34 +104,18 @@ async def show_main_menu(target_message: types.Message, state: FSMContext):
     rm_msg = await target_message.answer("🔄 Оновлення...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
     
-    welcome_text = """🎁 Вітаємо у розіграші від КОШИК та SAMA!
-Весну зустрічай - подарунок хапай!
-
-🧾 Реєструй чек на суму від 250 грн
-з будь-яким одним або кількома товарами торговельної марки SAMA
-та отримай шанс виграти круті призи! 🎁
-
-🥇 1 місце - мікрохвильова піч LG
-🥈 2 місце - праска Tefal
-🥉 3 місце - фен Philips
-
-🎁 4-6 місце - подарункові набори TM SAMA
-
-📌 Обов'язкова умова участі в розіграші:
-Бути підписаним на Instagram-сторінки КОШИК та SAMA"""
-    
-    try:
-        await target_message.edit_text(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
-    except:
-        await target_message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
+    welcome_text = (
+        "👋 <b>Вітаємо у нашому святковому розіграші!</b> 🎉\n\n"
+        "Тут ви можете реєструвати чеки за покупку нашої продукції та вигравати неймовірні призи! 🎁\n\n"
+        "⚠️ <b>Обов'язкова умова:</b> підписка на наші дві Instagram сторінки!\n\n"
+        "Оберіть потрібний розділ нижче 👇"
+    )
+    await target_message.answer(welcome_text, reply_markup=get_inline_start_kb(), parse_mode="HTML")
 
 async def process_show_cabinet(target_message, user_id: int):
     user_data = await redis.hgetall(f"user:{user_id}")
     if not user_data:
-        try:
-            await target_message.edit_text("🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Зареєструвати чек».", reply_markup=get_back_to_main_inline_kb())
-        except:
-            await target_message.answer("🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Зареєструвати чек».", reply_markup=get_back_to_main_inline_kb())
+        await target_message.answer("🤷‍♂️ Ви ще не зареєстровані.\nНатисніть «🧾 Завантажити чек».", reply_markup=get_back_to_main_inline_kb())
         return
 
     fio = user_data.get(b'fio', b'').decode('utf-8')
@@ -147,65 +131,35 @@ async def process_show_cabinet(target_message, user_id: int):
             try:
                 parts = item.decode('utf-8').split('|')
                 if len(parts) >= 2:
-                    date_str = parts[0]
-                    rec_num = parts[1]
-                    history_text += f"🔹 {date_str} — № {rec_num}\n"
+                    history_text += f"🔹 {parts[0]} — № {parts[1]}\n"
             except: pass
     else:
         history_text = "\n\n📋 <b>Історія ваших чеків:</b>\nПоки що порожньо."
 
     cabinet_text = (
-        "👤 <b>Мої чеки:</b>\n\n"
+        "👤 <b>Ваш особистий кабінет:</b>\n\n"
         f"🔸 <b>ПІБ:</b> {fio}\n🔸 <b>Телефон:</b> {phone}\n🔸 <b>Instagram:</b> {ig}\n"
         f"🎫 <b>Успішно схвалено чеків:</b> {receipts_count}{history_text}\n\n"
         "Так тримати! Чим більше чеків, тим ближче перемога 🏆"
     )
-    try:
-        await target_message.edit_text(cabinet_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
-    except:
-        await target_message.answer(cabinet_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
+    await target_message.answer(cabinet_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 async def process_start_upload(target_message, user_id: int, state: FSMContext):
     user_data = await redis.hgetall(f"user:{user_id}")
     if not user_data or b'ig' not in user_data:
-        try:
-            await target_message.edit_text("📝 Для початку реєстрації напишіть ваше <b>ПІБ</b>:", reply_markup=get_inline_back_kb(), parse_mode="HTML")
-        except:
-            await target_message.answer("📝 Для початку реєстрації напишіть ваше <b>ПІБ</b>:", reply_markup=get_inline_back_kb(), parse_mode="HTML")
+        await target_message.answer("📝 Для початку реєстрації напишіть ваше <b>ПІБ</b>:", reply_markup=get_inline_back_kb(), parse_mode="HTML")
         await state.set_state(Registration.waiting_for_fio)
     else:
-        try:
-            await target_message.edit_text("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
-        except:
-            await target_message.answer("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
+        await target_message.answer("🧾 <b>Введіть НОМЕР вашого чека:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
         await state.set_state(Registration.waiting_for_receipt_number)
 
-async def process_show_info(target_message):
-    info_text = """📜 <b>Як взяти участь:</b>
+async def process_show_rules(target_message):
+    rules = "📜 <b>Умови дуже прості:</b>\n\n1️⃣ Підписка на 2 сторінки.\n2️⃣ Купівля акційної продукції.\n3️⃣ Завантаження чека.\n\nБільше чеків — більше шансів!"
+    await target_message.answer(rules, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
-✔ Здійсни покупку в КОШИК на суму від 250 грн
-✔ Додай у чек будь-який товар ТМ SAMA
-✔ Натисни кнопку «Зареєструвати чек» та надішли фото чеку в бот
-✔ Підпишись на Instagram-сторінки КОШИК та ТМ SAMA
-
-🏆 <b>Що можна виграти?</b>
-🥇 1 місце — мікрохвильова піч LG
-🥈 2 місце — праска Tefal
-🥉 3 місце — фен Philips
-🎁 4–6 місце — подарункові набори ТМ SAMA
-
-📅 <b>Коли відбудеться розіграш?</b>
-Термін дії акції: 01.04.2026 - 30.04.2026.
-🎲 1 травня буде обрано 6 переможців за допомогою рандомайзера серед усіх учасників.
-📢 Результати розіграшу опублікуємо в Instagram-сторіс на сторінках КОШИК та ТМ SAMA.
-❗ <b>Важливо знати:</b>
-✔ Кількість чеків від одного учасника необмежена
-✔ Чим більше унікальних чеків - тим більше шансів виграти"""
-
-    try:
-        await target_message.edit_text(info_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
-    except:
-        await target_message.answer(info_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
+async def process_show_faq(target_message):
+    faq_text = "🏆 <b>Призи:</b>\n• Головний приз...\n\n❓ Зберігати чек ОБОВ'ЯЗКОВО."
+    await target_message.answer(faq_text, parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
 
 # --- ОБРОБНИКИ КОМАНД ---
 @dp.message(Command("start"))
@@ -241,7 +195,7 @@ async def cmd_stats(message: types.Message):
             phone = u.get(b'phone', b'').decode('utf-8')
             ig = u.get(b'ig', b'').decode('utf-8')
             tg_user = u.get(b'tg_username', b'').decode('utf-8')
-            last_store = u.get(b'last_store', b'').decode('utf-8') # <-- Дістаємо адресу магазину
+            last_store = u.get(b'last_store', b'').decode('utf-8') # <-- Достаем адрес
             receipts = int(u.get(b'receipts', b'0').decode('utf-8'))
             
             users_data.append({
@@ -267,7 +221,7 @@ async def cmd_stats(message: types.Message):
         output = io.StringIO()
         writer = csv.writer(output, delimiter=';') 
         
-        # Додаємо колонку з адресою
+        # Добавляем колонку с адресом
         writer.writerow(["ID", "ПІБ", "Телефон", "Instagram", "Telegram", "Кількість чеків", "Адреса магазину (остання)"])
         
         for u in users_data:
@@ -279,6 +233,7 @@ async def cmd_stats(message: types.Message):
         document = BufferedInputFile(csv_bytes, filename=f"stats_{datetime.now().strftime('%d-%m-%Y')}.csv")
         
         await message.answer_document(document=document, caption="📁 <b>Повний список учасників</b>\n<i>Файл можна відкрити в Excel або Google Таблицях.</i>", parse_mode="HTML")
+
 
 @dp.message(Command("sendall"))
 async def cmd_sendall(message: types.Message):
@@ -371,10 +326,15 @@ async def back_to_main_call(call: CallbackQuery, state: FSMContext):
     await call.message.delete()
     await show_main_menu(call.message, state)
 
-@dp.callback_query(F.data == "show_info")
-async def show_info_call(call: CallbackQuery):
+@dp.callback_query(F.data == "show_rules")
+async def show_rules_call(call: CallbackQuery):
     await call.answer()
-    await process_show_info(call.message)
+    await process_show_rules(call.message)
+
+@dp.callback_query(F.data == "show_faq")
+async def show_faq_call(call: CallbackQuery):
+    await call.answer()
+    await process_show_faq(call.message)
 
 @dp.callback_query(F.data == "my_cabinet")
 async def show_cabinet_call(call: CallbackQuery):
@@ -460,7 +420,6 @@ async def process_phone(message: types.Message, state: FSMContext):
     await state.set_state(Registration.waiting_for_receipt_number)
 
 
-# --- НОВИЙ КРОК: ЗАПИТ АДРЕСИ ---
 @dp.message(Registration.waiting_for_receipt_number)
 async def process_receipt_number(message: types.Message, state: FSMContext):
     if not message.text:
@@ -477,7 +436,7 @@ async def process_receipt_number(message: types.Message, state: FSMContext):
         
     await state.update_data(receipt_number=receipt_num)
     
-    # Запитуємо адресу після чека
+    # Новый шаг: запрашиваем адрес
     await message.answer("📍 <b>Введіть адресу магазину, де була здійснена покупка:</b>", reply_markup=get_inline_back_kb(), parse_mode="HTML")
     await state.set_state(Registration.waiting_for_store_address)
 
@@ -489,7 +448,6 @@ async def process_store_address(message: types.Message, state: FSMContext):
         
     await state.update_data(store_address=message.text)
     
-    # Після адреси робимо стандартну перевірку підписок
     user_id = message.from_user.id
     user_data = await redis.hgetall(f"user:{user_id}")
     is_sub_checked = user_data.get(b'sub_checked', b'0').decode('utf-8') == '1'
@@ -518,7 +476,7 @@ async def process_ig(message: types.Message, state: FSMContext):
 
 async def send_subscription_step_1(message: types.Message, state: FSMContext):
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
+        [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
         [InlineKeyboardButton(text="🔄 Перевірити підписку 1", callback_data="check_sub_1")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
     ])
@@ -532,7 +490,7 @@ async def process_check_sub_1(call: CallbackQuery, state: FSMContext):
     await asyncio.sleep(2) 
     
     kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📱 Перейти: tm.sama.ua", url=INSTAGRAM_LINK_1)],
+        [InlineKeyboardButton(text="📱 Перейти: koshik_shop_", url=INSTAGRAM_LINK_2)],
         [InlineKeyboardButton(text="🔄 Перевірити підписку 2", callback_data="check_sub_2")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data="back_action")]
     ])
@@ -557,7 +515,7 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
     
     state_data = await state.get_data()
     receipt_number_text = state_data.get("receipt_number", "Не вказано")
-    store_address_text = state_data.get("store_address", "Не вказано") # <-- Дістаємо адресу з пам'яті
+    store_address_text = state_data.get("store_address", "Не вказано")
     
     if receipt_number_text != "Не вказано":
         await redis.sadd("used_receipts", receipt_number_text)
@@ -565,14 +523,15 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
         await redis.rpush(f"user_receipts:{user_id}", f"{now_str}|{receipt_number_text}|{store_address_text}")
     
     await redis.hincrby(f"user:{user_id}", "receipts", 1)
-    
-    # Зберігаємо останню адресу магазину прямо в профіль користувача
-    await redis.hset(f"user:{user_id}", "last_store", store_address_text) 
+    await redis.hset(f"user:{user_id}", "last_store", store_address_text)
     
     new_count = (await redis.hget(f"user:{user_id}", "receipts")).decode('utf-8')
-    
     tg_username = f"@{message.from_user.username}" if message.from_user.username else "Немає"
     await redis.hset(f"user:{user_id}", "tg_username", tg_username)
+
+    fio = user_data.get(b'fio', b'').decode('utf-8')
+    phone = user_data.get(b'phone', b'').decode('utf-8')
+    ig_username = user_data.get(b'ig', b'').decode('utf-8')
 
     rm_msg = await message.answer("🔄 Обробка...", reply_markup=ReplyKeyboardRemove())
     await rm_msg.delete()
@@ -582,26 +541,25 @@ async def process_receipt_photo(message: types.Message, state: FSMContext):
 
     if GOOGLE_WEBHOOK_URL:
         google_data = {
-            "fio": user_data.get(b'fio', b'').decode('utf-8'),
-            "phone": user_data.get(b'phone', b'').decode('utf-8'),
+            "fio": fio,
+            "phone": phone,
             "tg_username": tg_username,
-            "ig_username": user_data.get(b'ig', b'').decode('utf-8'),
+            "ig_username": ig_username,
             "receipt_count": new_count,
             "receipt_number": receipt_number_text,
-            "store_address": store_address_text  # <-- Відправляємо адресу в Google
+            "store_address": store_address_text 
         }
         try:
             async with aiohttp.ClientSession() as session:
                 await session.post(GOOGLE_WEBHOOK_URL, json=google_data)
         except: pass
 
-    # Додаємо адресу в картку для модераторів
     admin_caption = (
         f"🆕 <b>Новий чек!</b> (У клієнта: {new_count})\n\n"
         f"🧾 <b>Номер:</b> {receipt_number_text}\n"
         f"📍 <b>Адреса:</b> {store_address_text}\n\n"
-        f"👤 <b>ПІБ:</b> {google_data['fio']}\n📱 <b>Телефон:</b> {google_data['phone']}\n"
-        f"📸 <b>Instagram:</b> {google_data['ig_username']}\n💬 <b>Юзернейм:</b> {tg_username}"
+        f"👤 <b>ПІБ:</b> {fio}\n📱 <b>Телефон:</b> {phone}\n"
+        f"📸 <b>Instagram:</b> {ig_username}\n💬 <b>Юзернейм:</b> {tg_username}"
     )
     
     admin_kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -642,7 +600,7 @@ async def admin_reject(call: CallbackQuery):
             break
             
     await redis.hincrby(f"user:{user_id}", "receipts", -1)
-    try: await bot.send_message(chat_id=user_id, text=f"⚠️ Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором. Завантажте його правильно ще раз.", parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
+    try: await bot.send_message(chat_id=user_id, text=f"⚠️ Ваш чек №{receipt_number} <b>ВІДХИЛЕНО</b> модератором.", parse_mode="HTML", reply_markup=get_back_to_main_inline_kb())
     except: pass
         
     caption = call.message.html_text or call.message.caption or "Чек"
